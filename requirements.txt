@@ -1,0 +1,9 @@
+iniconfig==2.3.0
+packaging==26.2
+pluggy==1.6.0
+psycopg==3.3.4
+psycopg-binary==3.3.4
+Pygments==2.20.0
+pytest==9.1.1
+SQLAlchemy==2.0.51
+typing_extensions==4.16.0
