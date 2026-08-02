@@ -14,3 +14,9 @@ class AccountStatus(Enum):
     ACTIVE = "active"
     CLOSED = "closed"
     FROZEN = "frozen"
+
+
+class InvestmentAccountActives(Enum):
+    stocks = "stocks"
+    bonds = "bonds"
+    etf = "etf"
