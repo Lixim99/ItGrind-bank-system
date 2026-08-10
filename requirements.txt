@@ -1,9 +1,15 @@
+argon2-cffi==25.1.0
+argon2-cffi-bindings==25.1.0
+cffi==2.1.0
 iniconfig==2.3.0
 packaging==26.2
 pluggy==1.6.0
 psycopg==3.3.4
 psycopg-binary==3.3.4
+pwdlib==0.3.0
+pycparser==3.0
 Pygments==2.20.0
 pytest==9.1.1
+python-dotenv==1.2.2
 SQLAlchemy==2.0.51
 typing_extensions==4.16.0
