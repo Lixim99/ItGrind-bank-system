@@ -2,7 +2,7 @@
 from enum import Enum
 
 
-class Currency(Enum):
+class AccountCurrency(Enum):
     RUB = "RUB"
     USD = "USD"
     EUR = "EUR"
@@ -14,6 +14,11 @@ class AccountStatus(Enum):
     ACTIVE = "active"
     CLOSED = "closed"
     FROZEN = "frozen"
+
+
+class ClientStatus(Enum):
+    ACTIVE = "active"
+    BLOCKED = "blocked"
 
 
 class InvestmentAccountActives(Enum):
