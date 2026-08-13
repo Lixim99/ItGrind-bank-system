@@ -21,12 +21,11 @@ from .exceptions import (
     InvalidOperationError,
 )
 from .models import BankAccount
-from .utils import Clock, bank_now, to_bank_time
+from .utils import Clock, bank_now, round_money, to_bank_time
 
 
 class RetryableTransactionError(Exception):
-    # RetryableTransactionError предназначен для временных технических
-    # ошибок (например, timeout внешнего сервиса курсов валют).
+    # Ошибка для временных сбоев, например недоступного сервиса курсов.
     pass
 
 
@@ -177,6 +176,9 @@ class Transaction:
         self._updated_at = now
 
     def _validate_amount(self, amount: Decimal) -> Decimal:
+        if not isinstance(amount, Decimal):
+            raise ValueError("Transaction amount must be Decimal")
+
         if not amount.is_finite():
             raise ValueError("Transaction amount must be finite")
 
@@ -210,6 +212,13 @@ class TransactionQueue:
         execute_at: datetime | None = None,
     ) -> None:
         now = to_bank_time(self._clock())
+
+        if transaction.status is not TransactionStatus.ACTIVE:
+            raise InvalidOperationError(
+                "Only an active transaction can be queued"
+            )
+
+        priority = TransactionPriority(priority)
 
         if execute_at is None:
             execute_at = now
@@ -314,9 +323,8 @@ class CommissionCalculator:
         if transaction.transaction_type == TransactionType.INTERNAL:
             return Decimal("0")
 
-        return (
-            transaction.amount
-            * self.EXTERNAL_COMMISSION
+        return round_money(
+            transaction.amount * self.EXTERNAL_COMMISSION
         )
 
 
@@ -344,7 +352,7 @@ class CurrencyConverter:
             to_currency,
         )
 
-        return amount * rate
+        return round_money(amount * rate)
 
     def get_rate(
         self,

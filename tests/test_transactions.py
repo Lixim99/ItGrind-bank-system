@@ -145,6 +145,15 @@ def test_day4_scheduled_transaction_becomes_ready(accounts):
     assert queue.get() is delayed
 
 
+def test_day4_queue_rejects_finished_transaction(accounts):
+    queue = TransactionQueue()
+    transaction = make_transaction(*accounts)
+    transaction.cancel("No longer needed")
+
+    with pytest.raises(InvalidOperationError, match="active transaction"):
+        queue.put(transaction=transaction)
+
+
 def test_day4_external_commission_and_currency_conversion(accounts):
     transaction = make_transaction(
         *accounts,
@@ -157,7 +166,13 @@ def test_day4_external_commission_and_currency_conversion(accounts):
         amount=Decimal("100"),
         from_currency=AccountCurrency.USD,
         to_currency=AccountCurrency.RUB,
-    ) == Decimal("8216.6500")
+    ) == Decimal("8216.65")
+
+    assert converter.convert(
+        amount=Decimal("1"),
+        from_currency=AccountCurrency.RUB,
+        to_currency=AccountCurrency.USD,
+    ).as_tuple().exponent == -2
 
 
 @pytest.mark.parametrize(

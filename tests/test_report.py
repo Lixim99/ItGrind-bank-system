@@ -10,7 +10,7 @@ from src.enums import (
     TransactionStatus,
     TransactionType,
 )
-from src.main import run_demo
+from src.demo import run_demo
 from src.models import BankAccount
 from src.report import ReportBuilder
 from src.transaction import Transaction
@@ -112,7 +112,7 @@ def test_day7_saves_pie_bar_and_balance_charts(client_factory, tmp_path):
         tmp_path,
     )
     charts_dir = tmp_path / "charts"
-    balance_chart = charts_dir / "balance.png"
+    balance_chart = tmp_path / "nested" / "balance.png"
 
     builder.save_charts(charts_dir)
     builder.save_account_balance_chart(
@@ -130,12 +130,22 @@ def test_day7_saves_pie_bar_and_balance_charts(client_factory, tmp_path):
 
 
 def test_day6_complete_demo_matches_assignment_and_exports_reports(tmp_path):
-    result = run_demo(tmp_path / "demo")
-    statuses = {transaction.status for transaction in result.transactions}
+    output_dir = tmp_path / "demo"
+    output_dir.mkdir()
+    (output_dir / "audit.jsonl").write_text("stale record\n")
+    (
+        _bank,
+        clients,
+        accounts,
+        transactions,
+        audit_log,
+        output_dir,
+    ) = run_demo(output_dir)
+    statuses = {transaction.status for transaction in transactions}
 
-    assert 5 <= len(result.clients) <= 10
-    assert 10 <= len(result.accounts) <= 15
-    assert 30 <= len(result.transactions) <= 50
+    assert 5 <= len(clients) <= 10
+    assert 10 <= len(accounts) <= 15
+    assert 30 <= len(transactions) <= 50
     assert statuses.issuperset(
         {
             # Success, error/suspicion blocking and queue cancellation.
@@ -149,12 +159,13 @@ def test_day6_complete_demo_matches_assignment_and_exports_reports(tmp_path):
     )
     assert any(
         "queued" in record.message.lower()
-        for record in result.audit_log.records
+        for record in audit_log.records
     )
     assert any(
         record.level is AuditLevel.CRITICAL
-        for record in result.audit_log.records
+        for record in audit_log.records
     )
+    assert "stale record" not in (output_dir / "audit.jsonl").read_text()
 
     expected_files = {
         "audit.jsonl",
@@ -167,5 +178,5 @@ def test_day6_complete_demo_matches_assignment_and_exports_reports(tmp_path):
         "account_balance_history.png",
     }
     assert expected_files.issubset(
-        {path.name for path in result.output_dir.iterdir()}
+        {path.name for path in output_dir.iterdir()}
     )

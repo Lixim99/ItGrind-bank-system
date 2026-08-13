@@ -45,7 +45,7 @@ class Bank:
         return client
 
     def authenticate_client(self, phone: str, password: str) -> Client | None:
-        client: Client = self._get_client_by_phone(phone)
+        client = self._get_client_by_phone(phone)
 
         if client is None:
             return None
@@ -73,7 +73,7 @@ class Bank:
         account_class: type[BankAccount],
         currency: AccountCurrency,
         account_number: str | None = None,
-    ) -> BankAccount | None:
+    ) -> BankAccount:
         client = self._clients.get(client.id)
 
         if client is None:

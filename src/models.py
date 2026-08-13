@@ -15,7 +15,7 @@ from .exceptions import (
     InsufficientFundsError,
     InvalidOperationError,
 )
-from .utils import bank_now, password_hasher
+from .utils import bank_now, password_hasher, round_money
 
 
 class AbstractAccount(ABC):
@@ -130,7 +130,7 @@ class BankAccount(AbstractAccount):
         self._status = self._validate_status(status)
 
     def _calculate_commission(self, amount: Decimal) -> Decimal:
-        return amount * self.WITHDRAWAL_COMMISSION
+        return round_money(amount * self.WITHDRAWAL_COMMISSION)
 
     def _validate_amount(self, amount: Decimal) -> None:
         if not isinstance(amount, Decimal):
@@ -240,7 +240,9 @@ class SavingsAccount(BankAccount):
                 "Balance is below the minimum required for interest application."
             )
 
-        self._balance += self.balance * self.MONTHLY_INTEREST_RATE
+        self._balance = round_money(
+            self.balance * (Decimal("1") + self.MONTHLY_INTEREST_RATE)
+        )
         self._record_balance()
 
     def withdraw(self, amount: Decimal) -> None:
@@ -390,7 +392,9 @@ class InvestmentAccount(BankAccount):
                 "Balance must be positive to project yearly growth."
             )
 
-        self._balance *= 1 + self.YEARLY_GROWTH_RATE
+        self._balance = round_money(
+            self.balance * (Decimal("1") + self.YEARLY_GROWTH_RATE)
+        )
         self._record_balance()
 
     def get_account_info(self) -> dict:

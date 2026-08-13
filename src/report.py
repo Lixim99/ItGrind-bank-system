@@ -330,6 +330,7 @@ class ReportBuilder:
         account: BankAccount,
         file_path: str | Path,
     ) -> None:
+        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
         self._save_balance_history_chart(
             account=account,
             file_path=file_path,
