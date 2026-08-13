@@ -1,5 +1,7 @@
 import csv
 import json
+from collections.abc import Sequence
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,26 @@ from .models import BankAccount, Client
 from .transaction import Transaction
 
 ReportData = dict[str, Any]
+MAX_TIME_LABELS = 8
+
+
+def _select_label_positions(points_count: int) -> list[int]:
+    """Выбрать не более восьми равномерных подписей оси."""
+    if points_count <= MAX_TIME_LABELS:
+        return list(range(points_count))
+
+    last_position = points_count - 1
+    return sorted(
+        {
+            round(index * last_position / (MAX_TIME_LABELS - 1))
+            for index in range(MAX_TIME_LABELS)
+        }
+    )
+
+
+def _format_chart_time(timestamp: datetime) -> str:
+    """Показать дату и московское время с миллисекундами."""
+    return timestamp.strftime("%d.%m.%Y\n%H:%M:%S.%f")[:-3]
 
 
 class ReportBuilder:
@@ -347,7 +369,7 @@ class ReportBuilder:
         if not history:
             return
 
-        timestamps = [
+        timestamps: Sequence[datetime] = [
             timestamp
             for timestamp, _ in history
         ]
@@ -357,23 +379,34 @@ class ReportBuilder:
             for _, balance in history
         ]
 
-        plt.figure()
+        plt.figure(figsize=(10, 6))
+
+        operation_numbers = range(1, len(history) + 1)
 
         plt.plot(
-            timestamps,
+            operation_numbers,
             balances,
             marker="o",
         )
 
         plt.title(
-            f"Balance history: {account.id}"
+            f"История баланса: ***{account.account_number[-4:]}"
         )
-        plt.xlabel("Time")
+        plt.xlabel("Время операции (Москва)")
         plt.ylabel(
-            f"Balance ({account.currency.value})"
+            f"Баланс ({account.currency.value})"
         )
 
-        plt.xticks(rotation=45)
+        label_positions = _select_label_positions(len(history))
+        plt.xticks(
+            ticks=[position + 1 for position in label_positions],
+            labels=[
+                _format_chart_time(timestamps[position])
+                for position in label_positions
+            ],
+            rotation=35,
+            ha="right",
+        )
         plt.tight_layout()
 
         plt.savefig(file_path)

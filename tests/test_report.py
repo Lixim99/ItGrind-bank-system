@@ -4,15 +4,20 @@ from decimal import Decimal
 
 from src.audit import AuditLog
 from src.bank import Bank
+from src.demo import run_demo
 from src.enums import (
     AccountCurrency,
     AuditLevel,
     TransactionStatus,
     TransactionType,
 )
-from src.demo import run_demo
 from src.models import BankAccount
-from src.report import ReportBuilder
+from src.report import (
+    MAX_TIME_LABELS,
+    ReportBuilder,
+    _format_chart_time,
+    _select_label_positions,
+)
 from src.transaction import Transaction
 
 
@@ -127,6 +132,29 @@ def test_day7_saves_pie_bar_and_balance_charts(client_factory, tmp_path):
     ):
         assert chart.exists()
         assert chart.stat().st_size > 0
+
+
+def test_balance_chart_uses_readable_time_labels():
+    from datetime import datetime
+
+    from src.utils import BANK_TIMEZONE
+
+    timestamp = datetime(
+        2026,
+        8,
+        13,
+        20,
+        5,
+        56,
+        640000,
+        tzinfo=BANK_TIMEZONE,
+    )
+
+    assert _format_chart_time(timestamp) == "13.08.2026\n20:05:56.640"
+    positions = _select_label_positions(20)
+    assert len(positions) == MAX_TIME_LABELS
+    assert positions[0] == 0
+    assert positions[-1] == 19
 
 
 def test_day6_complete_demo_matches_assignment_and_exports_reports(tmp_path):
