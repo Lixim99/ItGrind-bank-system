@@ -89,9 +89,10 @@ class Transaction:
         amount: Decimal,
         transaction_type: TransactionType,
         acceptor: BankAccount,
-        sender: BankAccount
+        sender: BankAccount,
+        created_at: datetime | None = None,
     ) -> None:
-        now = bank_now()
+        now = bank_now() if created_at is None else to_bank_time(created_at)
 
         if sender.id == acceptor.id:
             raise InvalidOperationError(
@@ -102,10 +103,10 @@ class Transaction:
         self._amount = self._validate_amount(amount)
         self._currency_from = sender.currency
         self._currency_to = acceptor.currency
-        self._commission = 0
+        self._commission = Decimal("0")
         self._sender = sender
         self._acceptor = acceptor
-        self._transaction_type = transaction_type
+        self._transaction_type = TransactionType(transaction_type)
         self._status = TransactionStatus.ACTIVE
         self._reason: str | None = None
         self._errors: list[tuple[datetime, str]] = []
@@ -186,7 +187,7 @@ class Transaction:
 
 
 class TransactionQueue:
-    def __init__(self) -> None:
+    def __init__(self, clock: Clock = bank_now) -> None:
         self._scheduled_queue: list[
             tuple[datetime, int, int, Transaction]
         ] = []
@@ -199,6 +200,7 @@ class TransactionQueue:
         self._transactions: dict[UUID, Transaction] = {}
 
         self._counter = count()
+        self._clock = clock
 
     def put(
         self,
@@ -207,7 +209,7 @@ class TransactionQueue:
         priority: TransactionPriority = TransactionPriority.NORMAL,
         execute_at: datetime | None = None,
     ) -> None:
-        now = bank_now()
+        now = to_bank_time(self._clock())
 
         if execute_at is None:
             execute_at = now
@@ -277,7 +279,7 @@ class TransactionQueue:
         return not self._transactions
 
     def _move_ready_transactions(self) -> None:
-        now = bank_now()
+        now = to_bank_time(self._clock())
 
         while self._scheduled_queue:
             execute_at, order, priority, transaction = (
@@ -310,7 +312,7 @@ class CommissionCalculator:
         transaction: Transaction,
     ) -> Decimal:
         if transaction.transaction_type == TransactionType.INTERNAL:
-            return 0
+            return Decimal("0")
 
         return (
             transaction.amount
@@ -350,7 +352,7 @@ class CurrencyConverter:
         to_currency: AccountCurrency,
     ) -> Decimal:
         if from_currency == to_currency:
-            return 1
+            return Decimal("1")
 
         from_rate = self.RUB_RATES.get(from_currency)
         to_rate = self.RUB_RATES.get(to_currency)
@@ -378,7 +380,7 @@ class OperationPolicy:
     def ensure_operation_allowed(self) -> None:
         current_time = to_bank_time(self._clock())
 
-        if 0 <= current_time.hour <= 5:
+        if 0 <= current_time.hour < 5:
             raise InvalidOperationError(
                 "Operations are prohibited from 00:00 to 05:00"
             )
@@ -528,11 +530,19 @@ class TransactionProcessor:
 
         sender_balance_before = sender.balance
         acceptor_balance_before = acceptor.balance
+        sender_history_length = len(sender.balance_history)
+        acceptor_history_length = len(acceptor.balance_history)
 
         try:
             sender.debit(total_amount)
             acceptor.deposit(converted_amount)
         except Exception:
-            sender._restore_balance(sender_balance_before)
-            acceptor._restore_balance(acceptor_balance_before)
+            sender._restore_state(
+                sender_balance_before,
+                sender_history_length,
+            )
+            acceptor._restore_state(
+                acceptor_balance_before,
+                acceptor_history_length,
+            )
             raise

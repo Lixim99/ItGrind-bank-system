@@ -1,4 +1,6 @@
 from decimal import Decimal
+from types import MappingProxyType
+from typing import Mapping
 from uuid import UUID
 
 from .enums import (
@@ -14,20 +16,24 @@ class Bank:
     MAX_FAILED_LOGIN_ATTEMPTS: int = 3
 
     @property
-    def clients(self) -> dict[UUID, Client]:
-        return self._clients
+    def clients(self) -> Mapping[UUID, Client]:
+        return MappingProxyType(self._clients)
 
     @property
-    def accounts(self) -> dict[UUID, BankAccount]:
-        return self._accounts
+    def accounts(self) -> Mapping[UUID, BankAccount]:
+        return MappingProxyType(self._accounts)
 
     def __init__(self) -> None:
         self._clients: dict[UUID, Client] = {}
         self._clients_by_phone: dict[str, UUID] = {}
         self._accounts: dict[UUID, BankAccount] = {}
+        self._accounts_by_number: dict[str, UUID] = {}
         self._accounts_by_currency: dict[AccountCurrency, set[UUID]] = {}
 
     def add_client(self, client: Client) -> Client:
+        if not isinstance(client, Client):
+            raise TypeError("client must be a Client instance")
+
         old_client = self._get_client_by_phone(client.phone)
 
         if old_client is not None:
@@ -65,7 +71,8 @@ class Bank:
         *,
         client: Client,
         account_class: type[BankAccount],
-        currency: AccountCurrency
+        currency: AccountCurrency,
+        account_number: str | None = None,
     ) -> BankAccount | None:
         client = self._clients.get(client.id)
 
@@ -74,13 +81,24 @@ class Bank:
 
         self._ensure_client_can_transact(client)
 
+        if not isinstance(account_class, type) or not issubclass(
+            account_class,
+            BankAccount,
+        ):
+            raise TypeError("account_class must inherit BankAccount")
+
         account = account_class(
             client=client,
-            currency=currency
+            currency=currency,
+            account_number=account_number,
         )
+
+        if account.account_number in self._accounts_by_number:
+            raise ValueError("An account with this number already exists")
 
         client.add_account(account)
         self._accounts[account.id] = account
+        self._accounts_by_number[account.account_number] = account.id
         self._accounts_by_currency.setdefault(
             account.currency,
             set(),

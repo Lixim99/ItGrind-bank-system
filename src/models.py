@@ -49,6 +49,9 @@ class AbstractAccount(ABC):
 
 
 class BankAccount(AbstractAccount):
+    WITHDRAWAL_LIMIT = Decimal("1000")
+    WITHDRAWAL_COMMISSION = Decimal("0.01")
+
     @property
     def currency(self) -> AccountCurrency:
         return self._currency
@@ -58,23 +61,32 @@ class BankAccount(AbstractAccount):
         return self._account_type
 
     @property
+    def account_number(self) -> str:
+        return self._account_number
+
+    @property
     def balance_history(self) -> tuple[tuple[datetime, Decimal], ...]:
         return tuple(self._balance_history)
-
-    WITHDRAWAL_COMMISSION = Decimal("0.01")
 
     def __init__(
         self,
         *,
         client: "Client",
         currency: AccountCurrency,
+        account_number: str | None = None,
     ) -> None:
+        if not isinstance(client, Client):
+            raise TypeError("client must be a Client instance")
+
         self._id = uuid4()
+        self._account_number = self._validate_account_number(
+            account_number or uuid4().hex[:8]
+        )
         self._client = client
         self._currency = AccountCurrency(currency)
         self._status = AccountStatus.ACTIVE
-        self._balance = 0
-        self._account_type = str(self.__class__)
+        self._balance = Decimal("0")
+        self._account_type = type(self).__name__
         self._balance_history: list[
             tuple[datetime, Decimal]
         ] = []
@@ -89,6 +101,11 @@ class BankAccount(AbstractAccount):
     def withdraw(self, amount: Decimal) -> None:
         self._validate_amount(amount)
         self._ensure_can_operate()
+
+        if amount > self.WITHDRAWAL_LIMIT:
+            raise InvalidOperationError(
+                f"Withdrawal limit is {self.WITHDRAWAL_LIMIT}"
+            )
 
         commission = self._calculate_commission(amount)
         total = amount + commission
@@ -110,12 +127,15 @@ class BankAccount(AbstractAccount):
         self._record_balance()
 
     def change_account_status(self, status: AccountStatus) -> None:
-        self._status = AccountStatus(status)
+        self._status = self._validate_status(status)
 
     def _calculate_commission(self, amount: Decimal) -> Decimal:
         return amount * self.WITHDRAWAL_COMMISSION
 
     def _validate_amount(self, amount: Decimal) -> None:
+        if not isinstance(amount, Decimal):
+            raise InvalidOperationError("Amount must be Decimal")
+
         if not amount.is_finite():
             raise InvalidOperationError("Amount must be finite")
 
@@ -142,12 +162,33 @@ class BankAccount(AbstractAccount):
                 'A blocked client cannot perform financial operations'
             )
 
-    def _validate_status(self, status: AccountStatus):
-        # сделать валидацию статуса
-        ...
+    @staticmethod
+    def _validate_status(status: AccountStatus) -> AccountStatus:
+        try:
+            return AccountStatus(status)
+        except (TypeError, ValueError) as error:
+            raise InvalidOperationError("Unknown account status") from error
 
-    def _restore_balance(self, balance: Decimal) -> None:
+    @staticmethod
+    def _validate_account_number(account_number: str) -> str:
+        normalized = account_number.strip()
+
+        if len(normalized) < 4:
+            raise ValueError(
+                "Account number must contain at least 4 characters")
+
+        if not normalized.isalnum():
+            raise ValueError("Account number must be alphanumeric")
+
+        return normalized
+
+    def _restore_state(
+        self,
+        balance: Decimal,
+        history_length: int,
+    ) -> None:
         self._balance = balance
+        del self._balance_history[history_length:]
 
     def _record_balance(self) -> None:
         self._balance_history.append(
@@ -160,18 +201,21 @@ class BankAccount(AbstractAccount):
     def get_account_info(self) -> dict:
         return {
             "client": self.client,
+            "account_number": self.account_number,
+            "account_type": self.account_type,
             "status": self.status,
             "currency": self.currency,
-            "balance": self.balance
+            "balance": self.balance,
+            "withdrawal_limit": self.WITHDRAWAL_LIMIT,
         }
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
-            f"BankAccount("
+            f"{self.account_type}("
             f"Client: {self.client.first_name} {self.client.last_name}, "
             f"Status: {self.status.value}, "
-            f"Account: ***{str(self.id)[-4:]}, "
-            f"Currency: {self.currency}, "
+            f"Account: ***{self.account_number[-4:]}, "
+            f"Currency: {self.currency.value}, "
             f"Balance: {self.balance}"
             f")"
         )
@@ -181,6 +225,14 @@ class SavingsAccount(BankAccount):
     MIN_BALANCE: Decimal = Decimal("100.00")
     MONTHLY_INTEREST_RATE: Decimal = Decimal("0.05")
 
+    @property
+    def min_balance(self) -> Decimal:
+        return self.MIN_BALANCE
+
+    @property
+    def monthly_interest_rate(self) -> Decimal:
+        return self.MONTHLY_INTEREST_RATE
+
     def apply_monthly_interest(self) -> None:
         self._ensure_can_operate()
         if self.balance < self.MIN_BALANCE:
@@ -189,10 +241,16 @@ class SavingsAccount(BankAccount):
             )
 
         self._balance += self.balance * self.MONTHLY_INTEREST_RATE
+        self._record_balance()
 
     def withdraw(self, amount: Decimal) -> None:
         self._ensure_can_operate()
         self._validate_amount(amount)
+
+        if amount > self.WITHDRAWAL_LIMIT:
+            raise InvalidOperationError(
+                f"Withdrawal limit is {self.WITHDRAWAL_LIMIT}"
+            )
 
         commission = self._calculate_commission(amount)
 
@@ -224,13 +282,25 @@ class SavingsAccount(BankAccount):
         }
 
     def __str__(self) -> str:
-        return super().__str__().replace("BankAccount", "SavingsAccount", 1)
+        return super().__str__()
 
 
 class PremiumAccount(BankAccount):
-    WITHDRAWAL_LIMIT = Decimal(5000)
-    OVERDRAFT_LIMIT = Decimal(1000)
-    WITHDRAWAL_COMMISSION = Decimal(1)
+    WITHDRAWAL_LIMIT = Decimal("5000")
+    OVERDRAFT_LIMIT = Decimal("1000")
+    WITHDRAWAL_COMMISSION = Decimal("1")
+
+    @property
+    def withdrawal_limit(self) -> Decimal:
+        return self.WITHDRAWAL_LIMIT
+
+    @property
+    def overdraft_limit(self) -> Decimal:
+        return self.OVERDRAFT_LIMIT
+
+    @property
+    def fixed_commission(self) -> Decimal:
+        return self.WITHDRAWAL_COMMISSION
 
     def get_account_info(self) -> dict:
         return {
@@ -253,6 +323,11 @@ class PremiumAccount(BankAccount):
         self._ensure_can_operate()
         self._validate_amount(amount)
 
+        if amount > self.WITHDRAWAL_LIMIT:
+            raise InvalidOperationError(
+                f"Withdrawal limit is {self.WITHDRAWAL_LIMIT}"
+            )
+
         balance_after = self.balance - (amount + self.WITHDRAWAL_COMMISSION)
 
         if balance_after < -self.OVERDRAFT_LIMIT:
@@ -264,11 +339,48 @@ class PremiumAccount(BankAccount):
         self._record_balance()
 
     def __str__(self) -> str:
-        return super().__str__().replace("BankAccount", "PremiumAccount", 1)
+        return super().__str__()
 
 
 class InvestmentAccount(BankAccount):
     YEARLY_GROWTH_RATE: Decimal = Decimal("0.13")
+
+    def __init__(
+        self,
+        *,
+        client: "Client",
+        currency: AccountCurrency,
+        account_number: str | None = None,
+    ) -> None:
+        super().__init__(
+            client=client,
+            currency=currency,
+            account_number=account_number,
+        )
+        self._portfolio = {
+            asset: Decimal("0")
+            for asset in InvestmentAccountActives
+        }
+
+    @property
+    def portfolio(self) -> dict[InvestmentAccountActives, Decimal]:
+        return self._portfolio.copy()
+
+    def allocate_asset(
+        self,
+        asset: InvestmentAccountActives,
+        amount: Decimal,
+    ) -> None:
+        self._ensure_can_operate()
+        self._validate_amount(amount)
+        asset = InvestmentAccountActives(asset)
+
+        if sum(self._portfolio.values(), Decimal("0")) + amount > self.balance:
+            raise InsufficientFundsError(
+                "Portfolio allocation exceeds the account balance"
+            )
+
+        self._portfolio[asset] += amount
 
     def project_yearly_growth(self) -> None:
         self._ensure_can_operate()
@@ -279,19 +391,23 @@ class InvestmentAccount(BankAccount):
             )
 
         self._balance *= 1 + self.YEARLY_GROWTH_RATE
+        self._record_balance()
 
     def get_account_info(self) -> dict:
         return {
             **super().get_account_info(),
             "Yearly Growth Rate": self.YEARLY_GROWTH_RATE,
-            "ACTIVES": [active.value for active in InvestmentAccountActives]
+            "Portfolio": {
+                asset.value: amount
+                for asset, amount in self._portfolio.items()
+            },
         }
 
     def withdraw(self, amount: Decimal) -> None:
         super().withdraw(amount)
 
     def __str__(self) -> str:
-        return super().__str__().replace("BankAccount", "InvestmentAccount", 1)
+        return super().__str__()
 
 
 class Client:
@@ -316,7 +432,9 @@ class Client:
         self._is_suspicious = False
         self._failed_login_attempts = 0
         self._email = self._validate_email(email)
-        self._password_hash = password_hasher.hash(password)
+        self._password_hash = password_hasher.hash(
+            self._validate_required_text(password)
+        )
         self._accounts = []
 
     @property
@@ -364,8 +482,8 @@ class Client:
         return self._failed_login_attempts
 
     @property
-    def accounts(self) -> list[BankAccount]:
-        return self._accounts
+    def accounts(self) -> tuple[BankAccount, ...]:
+        return tuple(self._accounts)
 
     @property
     def is_blocked(self) -> bool:
@@ -377,7 +495,7 @@ class Client:
 
     @property
     def account_numbers(self) -> list[str]:
-        return [str(account.id) for account in self.accounts]
+        return [account.account_number for account in self.accounts]
 
     def add_account(self, account: BankAccount) -> None:
         self._accounts.append(account)
@@ -394,10 +512,10 @@ class Client:
         if not normalized_phone:
             raise ValueError("Phone is required")
 
-        if phone.startswith("+"):
-            digits = phone[1:]
+        if normalized_phone.startswith("+"):
+            digits = normalized_phone[1:]
         else:
-            digits = phone
+            digits = normalized_phone
 
         if not digits.isdigit():
             raise ValueError("Phone must contain only digits")
@@ -419,7 +537,7 @@ class Client:
         if normalized_email.count("@") != 1:
             raise ValueError("Too many @")
 
-        local_part, domain = email.split("@")
+        local_part, domain = normalized_email.split("@")
 
         if not local_part:
             raise ValueError("Email local part cannot be empty")

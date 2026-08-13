@@ -4,12 +4,16 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 
 from .audit import AuditLog
-from .bank import Bank, BankAccount
+from .bank import Bank
 from .enums import AccountCurrency, AuditLevel, TransactionStatus
-from .models import Client
+from .models import BankAccount, Client
 from .transaction import Transaction
 
 ReportData = dict[str, Any]
@@ -49,13 +53,14 @@ class ReportBuilder:
     def build_client_report(self, client: Client) -> ReportData:
         accounts = client.accounts
 
-        total_balance = sum(
-            (
-                account.balance
-                for account in accounts
-            ),
-            Decimal(0),
-        )
+        total_balances: dict[str, Decimal] = {}
+
+        for account in accounts:
+            currency = account.currency.value
+            total_balances[currency] = (
+                total_balances.get(currency, Decimal(0))
+                + account.balance
+            )
 
         return {
             "client_id": str(client.id),
@@ -64,7 +69,10 @@ class ReportBuilder:
                 f"{client.last_name}"
             ),
             "accounts_count": len(accounts),
-            "total_balance": str(total_balance),
+            "total_balances": {
+                currency: str(balance)
+                for currency, balance in total_balances.items()
+            },
             "accounts": [
                 {
                     "id": str(account.id),
@@ -83,6 +91,12 @@ class ReportBuilder:
         return {
             "clients_count": len(clients),
             "accounts_count": len(accounts),
+            "total_balances": {
+                currency.value: str(
+                    self._bank.get_total_balance(currency)
+                )
+                for currency in AccountCurrency
+            },
             "clients": [
                 {
                     "id": str(client.id),
@@ -133,6 +147,7 @@ class ReportBuilder:
         file_path: str | Path,
     ) -> None:
         path = Path(file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
 
         with path.open(
             "w",
@@ -150,10 +165,12 @@ class ReportBuilder:
         rows: list[dict[str, Any]],
         file_path: str | Path,
     ) -> None:
-        if not rows:
-            return
-
         path = Path(file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not rows:
+            path.write_text("", encoding="utf-8")
+            return
 
         with path.open(
             "w",
@@ -251,11 +268,21 @@ class ReportBuilder:
 
         plt.figure()
 
-        plt.pie(
-            values,
-            labels=labels,
-            autopct="%1.1f%%",
-        )
+        if any(values):
+            plt.pie(
+                values,
+                labels=labels,
+                autopct="%1.1f%%",
+            )
+        else:
+            plt.text(
+                0.5,
+                0.5,
+                "No transactions",
+                horizontalalignment="center",
+                verticalalignment="center",
+            )
+            plt.axis("off")
 
         plt.title("Transaction statuses")
 

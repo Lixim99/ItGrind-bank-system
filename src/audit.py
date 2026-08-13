@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Mapping
 from uuid import UUID
 
 from .enums import AuditLevel, RiskLevel
@@ -24,8 +25,8 @@ class AuditRecord:
     transaction_id: UUID | None = None
     client_id: UUID | None = None
 
-    metadata: dict[str, object] = field(
-        default_factory=dict
+    metadata: Mapping[str, object] = field(
+        default_factory=lambda: MappingProxyType({})
     )
 
 
@@ -33,6 +34,7 @@ class AuditLog:
     def __init__(self, file_path: str | Path):
         self._records: list[AuditRecord] = []
         self._file_path = Path(file_path)
+        self._file_path.parent.mkdir(parents=True, exist_ok=True)
 
     @property
     def records(self) -> tuple[AuditRecord, ...]:
@@ -53,7 +55,7 @@ class AuditLog:
             message=message,
             transaction_id=transaction_id,
             client_id=client_id,
-            metadata=metadata or {}
+            metadata=MappingProxyType(dict(metadata or {}))
         )
 
         self._records.append(record)
@@ -66,7 +68,7 @@ class AuditLog:
             "message": record.message,
             "transaction_id": record.transaction_id,
             "client_id": record.client_id,
-            "metadata": record.metadata
+            "metadata": dict(record.metadata),
         }
 
         with self._file_path.open(
@@ -172,6 +174,7 @@ class RiskAnalyzer:
             if (
                 item.sender.id == transaction.sender.id
                 and item.created_at >= window_start
+                and item.created_at <= transaction.created_at
             )
         )
 
@@ -187,7 +190,7 @@ class RiskAnalyzer:
     def _is_night_operation(self, transaction: Transaction) -> bool:
         hour = to_bank_time(transaction.created_at).hour
 
-        return 0 <= hour <= 5
+        return 0 <= hour < 5
 
     def _calculate_level(self, score: int) -> RiskLevel:
         if score >= 4:
@@ -214,17 +217,17 @@ class AuditReporter:
         )
 
     def error_statistics(self) -> dict[str, int]:
-        statictics: dict[str, int] = {}
+        statistics: dict[str, int] = {}
 
         for record in self._audit_log.records:
             if record.level is not AuditLevel.CRITICAL:
                 continue
 
-            statictics[record.message] = (
-                statictics.get(record.message, 0) + 1
+            statistics[record.message] = (
+                statistics.get(record.message, 0) + 1
             )
 
-        return statictics
+        return statistics
 
     def client_risk_profile(
         self,
