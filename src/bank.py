@@ -1,6 +1,6 @@
+from collections.abc import Mapping
 from decimal import Decimal
 from types import MappingProxyType
-from typing import Mapping
 from uuid import UUID
 
 from .enums import (
