@@ -36,8 +36,8 @@ class TransactionStatus(Enum):
 
 
 class TransactionType(Enum):
-    INNER = "inner"
-    EXTERLAN = "external"
+    INTERNAL = "internal"
+    EXTERNAL = "external"
 
 
 class TransactionPriority(Enum):
@@ -50,7 +50,6 @@ class TransactionPriority(Enum):
 class AuditLevel(Enum):
     INFO = "info"
     WARNING = "warning"
-    ERROR = "error"
     CRITICAL = "critical"
 
 

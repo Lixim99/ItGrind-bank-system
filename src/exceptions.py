@@ -14,5 +14,5 @@ class InvalidOperationError(Exception):
 
 
 class InsufficientFundsError(Exception):
-    def __init__(self):
-        super().__init__("Insufficient funds error.")
+    def __init__(self, message: str,) -> None:
+        super().__init__(f"Insufficient funds: {message}")

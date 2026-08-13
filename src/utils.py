@@ -1,28 +1,21 @@
-from functools import wraps
+from collections.abc import Callable
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from .enums import AccountStatus
-from .exceptions import (
-    AccountClosedError,
-    AccountFrozenError,
-    InvalidOperationError,
-)
+from pwdlib import PasswordHash
+
+BANK_TIMEZONE = ZoneInfo("Europe/Moscow")
+Clock = Callable[[], datetime]
+
+password_hasher = PasswordHash.recommended()
 
 
-def account_must_be_active(func):
-    @wraps(func)
-    def wrapper(self, *args, **kwargs):
-        if self.client is None:
-            raise InvalidOperationError("Account has no registered client.")
-        if self.client.is_blocked:
-            raise InvalidOperationError(
-                "A blocked client cannot perform financial operations."
-            )
+def bank_now() -> datetime:
+    return datetime.now(BANK_TIMEZONE)
 
-        if self.status != AccountStatus.ACTIVE:
-            if self.status == AccountStatus.FROZEN:
-                raise AccountFrozenError()
-            raise AccountClosedError()
 
-        return func(self, *args, **kwargs)
+def to_bank_time(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Datetime must be timezone-aware")
 
-    return wrapper
+    return value.astimezone(BANK_TIMEZONE)
