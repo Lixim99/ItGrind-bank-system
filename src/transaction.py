@@ -1,22 +1,27 @@
 import heapq
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from itertools import count
 from typing import ClassVar
 from uuid import UUID, uuid4
 
+from .audit import AuditLog, RiskAnalyzer
 from .enums import (
     AccountCurrency,
+    AuditLevel,
+    RiskLevel,
     TransactionPriority,
     TransactionStatus,
     TransactionType,
 )
 from .exceptions import (
+    AccountClosedError,
     AccountFrozenError,
     InsufficientFundsError,
     InvalidOperationError,
 )
 from .models import BankAccount
+from .utils import Clock, bank_now, to_bank_time
 
 
 class RetryableTransactionError(Exception):
@@ -86,16 +91,18 @@ class Transaction:
         acceptor: BankAccount,
         sender: BankAccount
     ) -> None:
-        if amount <= Decimal("0"):
-            raise ValueError("Transaction amount must be positive")
+        now = bank_now()
 
-        now = datetime.now(timezone.utc)
+        if sender.id == acceptor.id:
+            raise InvalidOperationError(
+                "You can't send money yourself"
+            )
 
         self._id = uuid4()
-        self._amount = amount
+        self._amount = self._validate_amount(amount)
         self._currency_from = sender.currency
         self._currency_to = acceptor.currency
-        self._commission = Decimal("0")
+        self._commission = 0
         self._sender = sender
         self._acceptor = acceptor
         self._transaction_type = transaction_type
@@ -121,7 +128,7 @@ class Transaction:
 
         self._status = TransactionStatus.FAILED
         self._reason = reason
-        self._updated_at = datetime.now(timezone.utc)
+        self._updated_at = bank_now()
 
     def start_processing(self) -> None:
         if self._status != TransactionStatus.ACTIVE:
@@ -130,7 +137,7 @@ class Transaction:
             )
 
         self._status = TransactionStatus.PROCESSING
-        self._updated_at = datetime.now(timezone.utc)
+        self._updated_at = bank_now()
 
     def cancel(self, reason: str) -> None:
         if self._status != TransactionStatus.ACTIVE:
@@ -145,7 +152,7 @@ class Transaction:
 
         self._status = TransactionStatus.CANCELLED
         self._reason = reason
-        self._updated_at = datetime.now(timezone.utc)
+        self._updated_at = bank_now()
 
     def complete(self) -> None:
         if self._status != TransactionStatus.PROCESSING:
@@ -154,19 +161,28 @@ class Transaction:
             )
 
         self._status = TransactionStatus.COMPLETED
-        self._updated_at = datetime.now(timezone.utc)
+        self._updated_at = bank_now()
 
     def set_commission(self, commission: Decimal) -> None:
-        if commission < Decimal("0"):
+        if commission < 0:
             raise ValueError("Commission cannot be negative")
 
         self._commission = commission
 
     def add_error(self, error: str) -> None:
-        now = datetime.now(timezone.utc)
+        now = bank_now()
 
         self._errors.append((now, error))
         self._updated_at = now
+
+    def _validate_amount(self, amount: Decimal) -> Decimal:
+        if not amount.is_finite():
+            raise ValueError("Transaction amount must be finite")
+
+        if amount <= 0:
+            raise ValueError("Transaction amount must be positive")
+
+        return amount
 
 
 class TransactionQueue:
@@ -179,8 +195,7 @@ class TransactionQueue:
             tuple[int, int, Transaction]
         ] = []
 
-        # Lazy deletion ускоряет cancel(), но отменённые элементы
-        # остаются в heap до их извлечения и временно занимают память.
+        # Lazy deletion ускоряет cancel()
         self._transactions: dict[UUID, Transaction] = {}
 
         self._counter = count()
@@ -192,10 +207,12 @@ class TransactionQueue:
         priority: TransactionPriority = TransactionPriority.NORMAL,
         execute_at: datetime | None = None,
     ) -> None:
-        now = datetime.now(timezone.utc)
+        now = bank_now()
 
         if execute_at is None:
             execute_at = now
+        else:
+            execute_at = to_bank_time(execute_at)
 
         if transaction.id in self._transactions:
             raise ValueError("Transaction is already in queue")
@@ -260,7 +277,7 @@ class TransactionQueue:
         return not self._transactions
 
     def _move_ready_transactions(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = bank_now()
 
         while self._scheduled_queue:
             execute_at, order, priority, transaction = (
@@ -293,7 +310,7 @@ class CommissionCalculator:
         transaction: Transaction,
     ) -> Decimal:
         if transaction.transaction_type == TransactionType.INTERNAL:
-            return Decimal("0")
+            return 0
 
         return (
             transaction.amount
@@ -333,7 +350,7 @@ class CurrencyConverter:
         to_currency: AccountCurrency,
     ) -> Decimal:
         if from_currency == to_currency:
-            return Decimal("1.0")
+            return 1
 
         from_rate = self.RUB_RATES.get(from_currency)
         to_rate = self.RUB_RATES.get(to_currency)
@@ -351,6 +368,22 @@ class CurrencyConverter:
         return from_rate / to_rate
 
 
+class OperationPolicy:
+    def __init__(
+        self,
+        clock: Clock = bank_now,
+    ) -> None:
+        self._clock = clock
+
+    def ensure_operation_allowed(self) -> None:
+        current_time = to_bank_time(self._clock())
+
+        if 0 <= current_time.hour <= 5:
+            raise InvalidOperationError(
+                "Operations are prohibited from 00:00 to 05:00"
+            )
+
+
 class TransactionProcessor:
     MAX_RETRIES = 3
 
@@ -358,34 +391,118 @@ class TransactionProcessor:
         self,
         commission_calculator: CommissionCalculator,
         currency_converter: CurrencyConverter,
+        risk_analyzer: RiskAnalyzer,
+        audit_log: AuditLog,
+        operation_policy: OperationPolicy
     ) -> None:
         self._commission_calculator = commission_calculator
         self._currency_converter = currency_converter
+        self._risk_analyzer = risk_analyzer
+        self._audit_log = audit_log
+        self._operation_policy = operation_policy
 
     def process(self, transaction: Transaction) -> None:
+        try:
+            self._operation_policy.ensure_operation_allowed()
+        except InvalidOperationError as error:
+            transaction.fail(str(error))
+
+            self._audit_log.log(
+                level=AuditLevel.WARNING,
+                message=str(error),
+                transaction_id=transaction.id,
+                client_id=transaction.sender.client.id,
+            )
+            return
+
+        assessment = self._risk_analyzer.analyze(transaction)
+
+        if assessment.level == RiskLevel.HIGH:
+            reason = (
+                "Transaction blocked by risk analyzer: "
+                + ", ".join(assessment.reasons)
+            )
+
+            transaction.fail(reason)
+
+            self._audit_log.log(
+                level=AuditLevel.CRITICAL,
+                message=reason,
+                transaction_id=transaction.id,
+                client_id=transaction.sender.client.id,
+            )
+
+            return
+
+        if assessment.level == RiskLevel.MEDIUM:
+            self._audit_log.log(
+                level=AuditLevel.WARNING,
+                transaction_id=transaction.id,
+                message=(
+                    "Suspicious transaction: "
+                    + ", ".join(assessment.reasons)
+                ),
+                client_id=transaction.sender.client.id,
+            )
+
         transaction.start_processing()
 
         for attempt in range(self.MAX_RETRIES):
             try:
-                # Нужна транзакция БД для атомарного withdraw/deposit и безопасного retry
                 self._process(transaction)
             except (
                 InsufficientFundsError,
                 AccountFrozenError,
+                AccountClosedError,
                 InvalidOperationError
             ) as error:
                 transaction.add_error(str(error))
                 transaction.fail(str(error))
-                return
 
+                self._audit_log.log(
+                    level=AuditLevel.CRITICAL,
+                    message=str(error),
+                    transaction_id=transaction.id,
+                    client_id=transaction.sender.client.id,
+                )
+
+                return
             except RetryableTransactionError as error:
                 transaction.add_error(str(error))
 
                 if attempt == self.MAX_RETRIES - 1:
                     transaction.fail(str(error))
+
+                    self._audit_log.log(
+                        level=AuditLevel.CRITICAL,
+                        message="Transaction retry is out of max value",
+                        transaction_id=transaction.id,
+                        client_id=transaction.sender.client.id,
+                    )
+
                     return
+            except Exception as error:
+                transaction.add_error(str(error))
+                transaction.fail(str(error))
+
+                self._audit_log.log(
+                    level=AuditLevel.CRITICAL,
+                    message=str(error),
+                    transaction_id=transaction.id,
+                    client_id=transaction.sender.client.id,
+                )
+                return
+
             else:
                 transaction.complete()
+
+                self._audit_log.log(
+                    level=AuditLevel.INFO,
+                    message="Success operation",
+                    transaction_id=transaction.id,
+                    client_id=transaction.sender.client.id,
+                )
+
                 return
 
     def _process(self, transaction: Transaction) -> None:
@@ -409,5 +526,13 @@ class TransactionProcessor:
             to_currency=transaction.currency_to,
         )
 
-        sender.withdraw(total_amount)
-        acceptor.deposit(converted_amount)
+        sender_balance_before = sender.balance
+        acceptor_balance_before = acceptor.balance
+
+        try:
+            sender.debit(total_amount)
+            acceptor.deposit(converted_amount)
+        except Exception:
+            sender._restore_balance(sender_balance_before)
+            acceptor._restore_balance(acceptor_balance_before)
+            raise

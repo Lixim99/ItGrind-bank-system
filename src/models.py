@@ -1,172 +1,161 @@
 from abc import ABC, abstractmethod
+from datetime import datetime
 from decimal import Decimal
-from typing import ClassVar, Self, TypeVar
 from uuid import UUID, uuid4
 
-from pwdlib import PasswordHash
-from sqlalchemy import (
-    Boolean,
-    ForeignKey,
-    Numeric,
-    SmallInteger,
-    String,
-    Uuid,
-    or_,
-    select,
-)
-from sqlalchemy import Enum as SqlEnum
-from sqlalchemy.orm import Mapped, Session, mapped_column, relationship, validates
-
-from .base import Base
 from .enums import (
     AccountCurrency,
     AccountStatus,
     ClientStatus,
     InvestmentAccountActives,
 )
-from .exceptions import InsufficientFundsError, InvalidOperationError
-from .utils import account_must_be_active
+from .exceptions import (
+    AccountClosedError,
+    AccountFrozenError,
+    InsufficientFundsError,
+    InvalidOperationError,
+)
+from .utils import bank_now, password_hasher
 
 
 class AbstractAccount(ABC):
     @property
-    def id(self) -> str:
+    def id(self) -> UUID:
         return self._id
 
     @property
-    def client(self) -> str:
+    def client(self) -> "Client":
         return self._client
 
     @property
-    def status(self) -> str:
+    def status(self) -> AccountStatus:
         return self._status
 
     @property
-    def balance(self) -> float:
+    def balance(self) -> Decimal:
         return self._balance
 
     @abstractmethod
-    def deposit(self, amount: float) -> None:
-        pass
+    def deposit(self, amount: Decimal) -> None:
+        ...
 
     @abstractmethod
-    def withdraw(self, amount: float) -> None:
-        pass
+    def withdraw(self, amount: Decimal) -> None:
+        ...
 
     @abstractmethod
     def get_account_info(self) -> dict:
-        pass
+        ...
 
 
-class BankAccount(Base):
-    __tablename__ = "bank_accounts"
+class BankAccount(AbstractAccount):
+    @property
+    def currency(self) -> AccountCurrency:
+        return self._currency
 
-    id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
+    @property
+    def account_type(self) -> str:
+        return self._account_type
 
-    client_id: Mapped[UUID] = mapped_column(
-        ForeignKey("clients.id"),
-        nullable=False,
-        index=True,
-    )
+    @property
+    def balance_history(self) -> tuple[tuple[datetime, Decimal], ...]:
+        return tuple(self._balance_history)
 
-    currency: Mapped[AccountCurrency] = mapped_column(
-        SqlEnum(
-            AccountCurrency,
-            name="currency",
-        ),
-        nullable=False,
-    )
-
-    status: Mapped[AccountStatus] = mapped_column(
-        SqlEnum(
-            AccountStatus,
-            name="status",
-        ),
-        nullable=False,
-    )
-
-    balance: Mapped[Decimal] = mapped_column(
-        Numeric(18, 2),
-        nullable=False,
-        default=Decimal("0.00"),
-    )
-
-    account_type: Mapped[str] = mapped_column(
-        String(32),
-        nullable=False,
-    )
-
-    client: Mapped["Client"] = relationship(
-        "Client",
-        back_populates="accounts",
-    )
-
-    withdrawal_limit: ClassVar[Decimal] = Decimal("1000.00")
-    max_overdraft_limit: ClassVar[Decimal] = Decimal("0.00")
-    withdrawal_commission: ClassVar[Decimal] = Decimal("0.01")
-
-    __mapper_args__ = {
-        "polymorphic_on": account_type,
-        "polymorphic_identity": "bank_account",
-    }
+    WITHDRAWAL_COMMISSION = Decimal("0.01")
 
     def __init__(
         self,
         *,
         client: "Client",
-        currency: AccountCurrency | str,
+        currency: AccountCurrency,
     ) -> None:
-        self.client = client
-        self.currency = AccountCurrency(currency)
-        self.status = AccountStatus.ACTIVE
-        self.balance = Decimal("0.00")
+        self._id = uuid4()
+        self._client = client
+        self._currency = AccountCurrency(currency)
+        self._status = AccountStatus.ACTIVE
+        self._balance = 0
+        self._account_type = str(self.__class__)
+        self._balance_history: list[
+            tuple[datetime, Decimal]
+        ] = []
 
-    @account_must_be_active
-    def deposit(self, amount: Decimal | int | float) -> None:
-        amount = self._as_decimal(amount)
+    def deposit(self, amount: Decimal) -> None:
+        self._validate_amount(amount)
+        self._ensure_can_operate()
+
+        self._balance += amount
+        self._record_balance()
+
+    def withdraw(self, amount: Decimal) -> None:
+        self._validate_amount(amount)
+        self._ensure_can_operate()
+
+        commission = self._calculate_commission(amount)
+        total = amount + commission
+
+        if self.balance < total:
+            raise InsufficientFundsError(
+                "Available balance is less than withdrawal total"
+            )
+
+        self._balance -= total
+        self._record_balance()
+
+    def debit(self, amount: Decimal) -> None:
+        self._validate_amount(amount)
+        self._ensure_can_operate()
+
+        self._validate_debit(amount)
+        self._balance -= amount
+        self._record_balance()
+
+    def change_account_status(self, status: AccountStatus) -> None:
+        self._status = AccountStatus(status)
+
+    def _calculate_commission(self, amount: Decimal) -> Decimal:
+        return amount * self.WITHDRAWAL_COMMISSION
+
+    def _validate_amount(self, amount: Decimal) -> None:
+        if not amount.is_finite():
+            raise InvalidOperationError("Amount must be finite")
+
         if amount <= 0:
-            raise InvalidOperationError("Deposit amount must be positive.")
+            raise InvalidOperationError("Amount must be positive")
 
-        self.balance += amount
+    def _validate_debit(self, amount: Decimal) -> None:
+        balance_after = self.balance - amount
 
-    @account_must_be_active
-    def withdraw(self, amount: Decimal | int | float) -> None:
-        amount = self._as_decimal(amount)
-        if amount <= 0:
-            raise InvalidOperationError("Withdrawal amount must be positive.")
+        if balance_after < 0:
+            raise InsufficientFundsError(
+                "Available balance is less than required debit"
+            )
 
-        amount_with_commission = amount + (amount * self.withdrawal_commission)
+    def _ensure_can_operate(self) -> None:
+        if self.status == AccountStatus.FROZEN:
+            raise AccountFrozenError()
 
-        if self.balance + self.max_overdraft_limit < amount_with_commission:
-            raise InsufficientFundsError()
+        if self.status == AccountStatus.CLOSED:
+            raise AccountClosedError()
 
-        if amount_with_commission > self.withdrawal_limit:
+        if self.client.is_blocked:
             raise InvalidOperationError(
-                f"Withdrawal amount exceeds the limit of {self.withdrawal_limit}.")
+                'A blocked client cannot perform financial operations'
+            )
 
-        self.balance -= amount_with_commission
+    def _validate_status(self, status: AccountStatus):
+        # сделать валидацию статуса
+        ...
 
-    def change_account_status(self, status: AccountStatus | str) -> None:
-        self.status = AccountStatus(status)
+    def _restore_balance(self, balance: Decimal) -> None:
+        self._balance = balance
 
-    @staticmethod
-    def _as_decimal(amount: float) -> Decimal:
-        if isinstance(amount, bool) or not isinstance(
-            amount,
-            (Decimal, int, float),
-        ):
-            raise TypeError("Amount must be a number")
-
-        normalized = Decimal(str(amount))
-
-        if not normalized.is_finite():
-            raise ValueError("Amount must be finite")
-
-        return normalized
+    def _record_balance(self) -> None:
+        self._balance_history.append(
+            (
+                bank_now(),
+                self._balance,
+            )
+        )
 
     def get_account_info(self) -> dict:
         return {
@@ -179,9 +168,9 @@ class BankAccount(Base):
     def __str__(self):
         return (
             f"BankAccount("
-            f"ID: ***{str(self.id)[-4:]}, "
-            f"Client: {self.client}, "
-            f"Status: {self.status}, "
+            f"Client: {self.client.first_name} {self.client.last_name}, "
+            f"Status: {self.status.value}, "
+            f"Account: ***{str(self.id)[-4:]}, "
             f"Currency: {self.currency}, "
             f"Balance: {self.balance}"
             f")"
@@ -189,39 +178,49 @@ class BankAccount(Base):
 
 
 class SavingsAccount(BankAccount):
-    __mapper_args__ = {"polymorphic_identity": "savings_account"}
+    MIN_BALANCE: Decimal = Decimal("100.00")
+    MONTHLY_INTEREST_RATE: Decimal = Decimal("0.05")
 
-    min_balance: ClassVar[Decimal] = Decimal("100.00")
-    monthly_interest_rate: ClassVar[Decimal] = Decimal("0.05")
-
-    @account_must_be_active
     def apply_monthly_interest(self) -> None:
-        if self.balance < self.min_balance:
+        self._ensure_can_operate()
+        if self.balance < self.MIN_BALANCE:
             raise InvalidOperationError(
-                "Balance is below the minimum required for interest application.")
-
-        self.balance += self.balance * self.monthly_interest_rate
-
-    @account_must_be_active
-    def withdraw(self, amount: float) -> None:
-        normalized_amount = self._as_decimal(amount)
-        amount_with_commission = normalized_amount
-        if normalized_amount > 0:
-            amount_with_commission += (
-                normalized_amount * self.withdrawal_commission
+                "Balance is below the minimum required for interest application."
             )
 
-        if self.balance - amount_with_commission < self.min_balance:
-            raise InvalidOperationError(
-                f"Withdrawal would reduce the balance below {self.min_balance}.")
+        self._balance += self.balance * self.MONTHLY_INTEREST_RATE
 
-        super().withdraw(normalized_amount)
+    def withdraw(self, amount: Decimal) -> None:
+        self._ensure_can_operate()
+        self._validate_amount(amount)
+
+        commission = self._calculate_commission(amount)
+
+        balance_after = self.balance - amount - commission
+
+        if balance_after < self.MIN_BALANCE:
+            raise InvalidOperationError(
+                f"Withdrawal would reduce the balance below {self.MIN_BALANCE}."
+            )
+
+        self._balance = balance_after
+        self._record_balance()
+
+    def _validate_debit(self, amount: Decimal) -> None:
+        super()._validate_debit(amount)
+
+        balance_after = self.balance - amount
+
+        if balance_after < self.MIN_BALANCE:
+            raise InvalidOperationError(
+                f"Balance cannot be below {self.MIN_BALANCE}"
+            )
 
     def get_account_info(self) -> dict:
         return {
             **super().get_account_info(),
-            "Minimum Balance": self.min_balance,
-            "Monthly Interest Rate": self.monthly_interest_rate
+            "Minimum Balance": self.MIN_BALANCE,
+            "Monthly Interest Rate": self.MONTHLY_INTEREST_RATE
         }
 
     def __str__(self) -> str:
@@ -229,158 +228,148 @@ class SavingsAccount(BankAccount):
 
 
 class PremiumAccount(BankAccount):
-    __mapper_args__ = {"polymorphic_identity": "premium_account"}
-
-    withdrawal_limit: ClassVar[Decimal] = Decimal("5000.00")
-    max_overdraft_limit: ClassVar[Decimal] = Decimal("1000.00")
-    fixed_withdrawal_commission: ClassVar[Decimal] = Decimal("1.00")
-    withdrawal_commission: ClassVar[Decimal] = Decimal("0.00")
+    WITHDRAWAL_LIMIT = Decimal(5000)
+    OVERDRAFT_LIMIT = Decimal(1000)
+    WITHDRAWAL_COMMISSION = Decimal(1)
 
     def get_account_info(self) -> dict:
         return {
             **super().get_account_info(),
-            "Withdrawal Limit": self.withdrawal_limit,
-            "Maximum Overdraft Limit": self.max_overdraft_limit,
-            "Fixed Commission": self.fixed_withdrawal_commission
+            "Withdrawal Limit": self.WITHDRAWAL_LIMIT,
+            "Maximum Overdraft Limit": self.OVERDRAFT_LIMIT,
+            "Fixed Commission": self.WITHDRAWAL_COMMISSION
         }
 
-    @account_must_be_active
-    def withdraw(self, amount: float) -> None:
-        normalized_amount = self._as_decimal(amount)
-        if normalized_amount > 0:
-            normalized_amount += self.fixed_withdrawal_commission
+    def _validate_debit(self, amount: Decimal) -> None:
+        balance_after = self.balance - amount
 
-        super().withdraw(normalized_amount)
+        if balance_after < -self.OVERDRAFT_LIMIT:
+            raise InsufficientFundsError(
+                f"Debit would exceed the overdraft limit "
+                f"of {self.OVERDRAFT_LIMIT}"
+            )
+
+    def withdraw(self, amount: Decimal) -> None:
+        self._ensure_can_operate()
+        self._validate_amount(amount)
+
+        balance_after = self.balance - (amount + self.WITHDRAWAL_COMMISSION)
+
+        if balance_after < -self.OVERDRAFT_LIMIT:
+            raise InsufficientFundsError(
+                "Withdrawal would exceed the overdraft limit"
+            )
+
+        self._balance = balance_after
+        self._record_balance()
 
     def __str__(self) -> str:
         return super().__str__().replace("BankAccount", "PremiumAccount", 1)
 
 
 class InvestmentAccount(BankAccount):
-    __mapper_args__ = {"polymorphic_identity": "investment_account"}
+    YEARLY_GROWTH_RATE: Decimal = Decimal("0.13")
 
-    yearly_growth_rate: ClassVar[Decimal] = Decimal("0.13")
-
-    @account_must_be_active
     def project_yearly_growth(self) -> None:
+        self._ensure_can_operate()
+
         if self.balance <= 0:
             raise InvalidOperationError(
-                "Balance must be positive to project yearly growth.")
+                "Balance must be positive to project yearly growth."
+            )
 
-        self.balance *= Decimal("1.00") + self.yearly_growth_rate
+        self._balance *= 1 + self.YEARLY_GROWTH_RATE
 
     def get_account_info(self) -> dict:
         return {
             **super().get_account_info(),
-            "Yearly Growth Rate": self.yearly_growth_rate,
+            "Yearly Growth Rate": self.YEARLY_GROWTH_RATE,
             "ACTIVES": [active.value for active in InvestmentAccountActives]
         }
 
-    def withdraw(self, amount: float) -> None:
+    def withdraw(self, amount: Decimal) -> None:
         super().withdraw(amount)
 
     def __str__(self) -> str:
         return super().__str__().replace("BankAccount", "InvestmentAccount", 1)
 
 
-AccountT = TypeVar("AccountT", bound=BankAccount)
+class Client:
+    def __init__(
+        self,
+        *,
+        first_name: str,
+        last_name: str,
+        middle_name: str | None = None,
+        phone: str,
+        age: int,
+        email: str,
+        password: str,
+    ) -> None:
+        self._id = uuid4()
+        self._first_name = self._validate_required_text(first_name)
+        self._last_name = self._validate_required_text(last_name)
+        self._middle_name = middle_name.strip() if middle_name is not None else ""
+        self._phone = self._validate_phone(phone)
+        self._age = self._validate_age(age)
+        self._status = ClientStatus.ACTIVE
+        self._is_suspicious = False
+        self._failed_login_attempts = 0
+        self._email = self._validate_email(email)
+        self._password_hash = password_hasher.hash(password)
+        self._accounts = []
 
-password_hasher = PasswordHash.recommended()
+    @property
+    def id(self) -> UUID:
+        return self._id
 
+    @property
+    def first_name(self) -> str:
+        return self._first_name
 
-class Client(Base):
-    __tablename__ = "clients"
+    @property
+    def last_name(self) -> str:
+        return self._last_name
 
-    id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
+    @property
+    def middle_name(self) -> str:
+        return self._middle_name
 
-    phone: Mapped[str] = mapped_column(
-        String(16),
-        unique=True,
-        nullable=False,
-    )
+    @property
+    def phone(self) -> str:
+        return self._phone
 
-    age: Mapped[int] = mapped_column(
-        SmallInteger,
-        nullable=False,
-    )
+    @property
+    def age(self) -> int:
+        return self._age
 
-    is_suspicious: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        default=False,
-    )
+    @property
+    def status(self) -> ClientStatus:
+        return self._status
 
-    failed_login_attempts: Mapped[int] = mapped_column(
-        SmallInteger,
-        nullable=False,
-        default=0,
-    )
+    @property
+    def email(self) -> str:
+        return self._email
 
-    email: Mapped[str] = mapped_column(
-        String(254),
-        unique=True,
-        nullable=False,
-    )
+    @property
+    def password_hash(self) -> str:
+        return self._password_hash
 
-    password_hash: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
-    )
+    @property
+    def is_suspicious(self) -> bool:
+        return self._is_suspicious
 
-    status: Mapped[str] = mapped_column(
-        String(16),
-        nullable=False,
-        default=ClientStatus.ACTIVE.value,
-    )
+    @property
+    def failed_login_attempts(self) -> int:
+        return self._failed_login_attempts
 
-    first_name: Mapped[str] = mapped_column(String(100))
-
-    last_name: Mapped[str] = mapped_column(String(100))
-
-    middle_name: Mapped[str | None] = mapped_column(
-        String(100),
-        nullable=True,
-    )
-
-    accounts: Mapped[list[BankAccount]] = relationship(
-        back_populates="client",
-        cascade="all, delete-orphan",
-    )
-
-    @validates("age")
-    def _validate_age(self, _key: str, age: int) -> int:
-        if isinstance(age, bool) or not isinstance(age, int):
-            raise TypeError("Age must be an integer")
-        if age < 18:
-            raise ValueError("Client must be at least 18 years old")
-        return age
-
-    @validates("first_name", "last_name", "email", "phone")
-    def _validate_required_text(self, key: str, value: str) -> str:
-        if not isinstance(value, str) or not value.strip():
-            readable_name = key.replace("_", " ").capitalize()
-            raise ValueError(f"{readable_name} is required")
-
-        normalized = value.strip()
-        if key == "email":
-            normalized = normalized.lower()
-        return normalized
+    @property
+    def accounts(self) -> list[BankAccount]:
+        return self._accounts
 
     @property
     def is_blocked(self) -> bool:
-        return self.status == ClientStatus.BLOCKED.value
-
-    @property
-    def full_name(self) -> str:
-        return " ".join(
-            part
-            for part in (self.last_name, self.first_name, self.middle_name)
-            if part
-        )
+        return self.status == ClientStatus.BLOCKED
 
     @property
     def contacts(self) -> dict[str, str]:
@@ -390,205 +379,76 @@ class Client(Base):
     def account_numbers(self) -> list[str]:
         return [str(account.id) for account in self.accounts]
 
-    @classmethod
-    def create(
-        cls,
-        *,
-        age: int,
-        first_name: str,
-        last_name: str,
-        middle_name: str | None = None,
-        email: str,
-        phone: str,
-        password: str
-    ) -> Self:
-        if age < 18:
-            raise ValueError("Too young")
+    def add_account(self, account: BankAccount) -> None:
+        self._accounts.append(account)
 
-        return cls(
-            id=uuid4(),
-            age=age,
-            first_name=first_name,
-            last_name=last_name,
-            middle_name=middle_name,
-            email=email,
-            phone=phone,
-            password_hash=password_hasher.hash(password),
-            status=ClientStatus.ACTIVE.value,
-            failed_login_attempts=0,
-            is_suspicious=False,
-        )
+    def _validate_age(self, age: int) -> int:
+        if age < 18:
+            raise ValueError("Client must be at least 18 years old")
+
+        return age
+
+    def _validate_phone(self, phone: str) -> str:
+        normalized_phone = phone.strip()
+
+        if not normalized_phone:
+            raise ValueError("Phone is required")
+
+        if phone.startswith("+"):
+            digits = phone[1:]
+        else:
+            digits = phone
+
+        if not digits.isdigit():
+            raise ValueError("Phone must contain only digits")
+
+        if len(digits) < 10:
+            raise ValueError("Phone number is too short")
+
+        if len(digits) > 15:
+            raise ValueError("Phone number is too long")
+
+        return normalized_phone
+
+    def _validate_email(self, email: str) -> str:
+        normalized_email = email.strip().lower()
+
+        if not normalized_email:
+            raise ValueError("Email is required")
+
+        if normalized_email.count("@") != 1:
+            raise ValueError("Too many @")
+
+        local_part, domain = email.split("@")
+
+        if not local_part:
+            raise ValueError("Email local part cannot be empty")
+
+        if not domain:
+            raise ValueError("Email domain cannot be empty")
+
+        if "." not in domain:
+            raise ValueError("Email domain must contain a dot")
+
+        if domain.startswith(".") or domain.endswith("."):
+            raise ValueError("Invalid email domain")
+
+        return normalized_email
+
+    def _validate_required_text(self, value: str) -> str:
+        normalized = value.strip()
+
+        if not normalized:
+            raise ValueError("Field is required")
+
+        return normalized
 
     def register_failed_login(self, max_attempts: int) -> None:
-        self.failed_login_attempts = (self.failed_login_attempts or 0) + 1
-        if self.failed_login_attempts >= max_attempts:
-            self.status = ClientStatus.BLOCKED.value
-            self.is_suspicious = True
+        self._failed_login_attempts = (self._failed_login_attempts or 0) + 1
+
+        if self._failed_login_attempts >= max_attempts:
+            self._status = ClientStatus.BLOCKED
+            self._is_suspicious = True
 
     def reset_failed_logins(self) -> None:
-        self.failed_login_attempts = 0
-
-
-class Bank:
-    MAX_FAILED_LOGIN_ATTEMPTS = 3
-
-    def __init__(self, session: Session) -> None:
-        self._session = session
-
-    def add_client(self, client: Client) -> None:
-        duplicate = self._session.scalar(
-            select(Client).where(
-                or_(Client.phone == client.phone, Client.email == client.email)
-            )
-        )
-
-        if duplicate is not None:
-            raise ValueError(
-                "A client with this phone or email already exists")
-
-        self._session.add(client)
-        self._session.flush()
-
-    def authenticate_client(self, phone: str, password: str) -> Client | None:
-        client = self._session.scalar(
-            select(Client).where(Client.phone == phone))
-
-        if client is None:
-            return None
-
-        if client.is_blocked:
-            return None
-
-        is_password_correct = password_hasher.verify(
-            password,
-            client.password_hash,
-        )
-
-        if not is_password_correct:
-            client.register_failed_login(self.MAX_FAILED_LOGIN_ATTEMPTS)
-            self._session.flush()
-            return None
-
-        client.reset_failed_logins()
-        self._session.flush()
-        return client
-
-    def save_account_transact(self, account: BankAccount) -> None:
-        managed_account = self._get_account(account)
-        self._ensure_client_can_transact(managed_account.client)
-        self._session.flush()
-
-    def open_account(self, account: AccountT) -> AccountT:
-        managed_client = self._get_client(account.client)
-        self._ensure_client_can_transact(managed_client)
-        account.client = managed_client
-        self._session.add(account)
-        self._session.flush()
-
-        return account
-
-    def close_account(self, account: BankAccount) -> None:
-        managed_account = self._get_account(account)
-        self._ensure_client_can_transact(managed_account.client)
-        if managed_account.status == AccountStatus.CLOSED:
-            raise InvalidOperationError("Account is already closed.")
-
-        managed_account.change_account_status(AccountStatus.CLOSED)
-        self._session.flush()
-
-    def search_accounts(
-        self,
-        *,
-        currency: AccountCurrency | None = None,
-        client: Client | None = None,
-    ) -> list[BankAccount]:
-        statement = select(BankAccount)
-
-        if currency is not None:
-            statement = statement.where(BankAccount.currency == currency)
-
-        if client is not None:
-            statement = statement.where(BankAccount.client_id == client.id)
-
-        accounts = list(self._session.scalars(statement))
-        # _bind_account_security
-        return accounts
-
-    def freeze_account(self, account: BankAccount) -> None:
-        managed_account = self._get_account(account)
-        self._ensure_client_can_transact(managed_account.client)
-        if managed_account.status != AccountStatus.ACTIVE:
-            raise InvalidOperationError(
-                "Only an active account can be frozen.")
-
-        managed_account.change_account_status(AccountStatus.FROZEN)
-        self._session.flush()
-
-    def unfreeze_account(self, account: BankAccount) -> None:
-        managed_account = self._get_account(account)
-        self._ensure_client_can_transact(managed_account.client)
-        if managed_account.status != AccountStatus.FROZEN:
-            raise InvalidOperationError(
-                "Only a frozen account can be unfrozen.")
-
-        managed_account.change_account_status(AccountStatus.ACTIVE)
-        self._session.flush()
-
-    def get_total_balance(
-        self,
-        currency: AccountCurrency,
-        client: Client | None = None
-    ) -> Decimal:
-        accounts = self.search_accounts(client=client, currency=currency)
-
-        return sum(
-            (account.balance for account in accounts),
-            start=Decimal("0.00"),
-        )
-
-    def get_clients_ranking(self, currency: AccountCurrency) -> list[Client]:
-        clients = list(
-            self._session.scalars(
-                select(Client).order_by(Client.last_name,
-                                        Client.first_name, Client.id)
-            )
-        )
-
-        return sorted(
-            clients,
-            key=lambda client: self.get_total_balance(currency, client),
-            reverse=True,
-        )
-
-    def _get_account(self, account: BankAccount) -> BankAccount:
-        if account.id is None:
-            raise ValueError("Account does not belong to this bank")
-
-        managed_account = self._session.get(BankAccount, account.id)
-
-        if managed_account is None:
-            raise ValueError("Account does not belong to this bank")
-
-        # self._bind_account_security(managed_account)
-
-        return managed_account
-
-    def _get_client(self, client: Client) -> Client:
-        if client.id is None:
-            raise ValueError("Client does not belong to this bank")
-
-        with self._session.no_autoflush:
-            managed_client = self._session.get(Client, client.id)
-        if managed_client is None:
-            raise ValueError("Client does not belong to this bank")
-
-        return managed_client
-
-    @staticmethod
-    def _ensure_client_can_transact(client: Client | None) -> None:
-        if client is None:
-            raise InvalidOperationError("Account has no registered client.")
-        if client.is_blocked:
-            raise InvalidOperationError(
-                "A blocked client cannot perform financial operations."
-            )
+        self._failed_login_attempts = 0
