@@ -21,6 +21,7 @@ from .exceptions import (
     InvalidOperationError,
 )
 from .models import BankAccount
+from .policy import OperationPolicy
 from .utils import Clock, bank_now, round_money, to_bank_time
 
 
@@ -378,22 +379,6 @@ class CurrencyConverter:
         return from_rate / to_rate
 
 
-class OperationPolicy:
-    def __init__(
-        self,
-        clock: Clock = bank_now,
-    ) -> None:
-        self._clock = clock
-
-    def ensure_operation_allowed(self) -> None:
-        current_time = to_bank_time(self._clock())
-
-        if 0 <= current_time.hour < 5:
-            raise InvalidOperationError(
-                "Operations are prohibited from 00:00 to 05:00"
-            )
-
-
 class TransactionProcessor:
     MAX_RETRIES = 3
 
@@ -403,18 +388,18 @@ class TransactionProcessor:
         currency_converter: CurrencyConverter,
         risk_analyzer: RiskAnalyzer,
         audit_log: AuditLog,
-        operation_policy: OperationPolicy
     ) -> None:
         self._commission_calculator = commission_calculator
         self._currency_converter = currency_converter
         self._risk_analyzer = risk_analyzer
         self._audit_log = audit_log
-        self._operation_policy = operation_policy
 
     def process(self, transaction: Transaction) -> None:
         try:
-            self._operation_policy.ensure_operation_allowed()
+            OperationPolicy.ensure_operation_allowed()
         except InvalidOperationError as error:
+            transaction.sender.client.mark_is_suspicious()
+
             transaction.fail(str(error))
 
             self._audit_log.log(
@@ -428,6 +413,8 @@ class TransactionProcessor:
         assessment = self._risk_analyzer.analyze(transaction)
 
         if assessment.level == RiskLevel.HIGH:
+            transaction.sender.client.mark_is_suspicious()
+
             reason = (
                 "Transaction blocked by risk analyzer: "
                 + ", ".join(assessment.reasons)
@@ -445,6 +432,8 @@ class TransactionProcessor:
             return
 
         if assessment.level == RiskLevel.MEDIUM:
+            transaction.sender.client.mark_is_suspicious()
+
             self._audit_log.log(
                 level=AuditLevel.WARNING,
                 transaction_id=transaction.id,

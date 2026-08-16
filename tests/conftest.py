@@ -1,11 +1,28 @@
 from collections.abc import Callable
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
+from src import policy
 from src.models import Client
-from src.transaction import OperationPolicy
 from src.utils import BANK_TIMEZONE
+
+
+@pytest.fixture(autouse=True)
+def bank_clock(monkeypatch) -> SimpleNamespace:
+    clock = SimpleNamespace(
+        now=datetime(
+            2026,
+            1,
+            1,
+            12,
+            tzinfo=BANK_TIMEZONE,
+        )
+    )
+    monkeypatch.setattr(policy, "bank_now", lambda: clock.now)
+
+    return clock
 
 
 @pytest.fixture
@@ -26,29 +43,3 @@ def client_factory() -> Callable[..., Client]:
         return Client(**values)
 
     return make_client
-
-
-@pytest.fixture
-def allowed_operation_policy() -> OperationPolicy:
-    return OperationPolicy(
-        clock=lambda: datetime(
-            2026,
-            1,
-            1,
-            12,
-            tzinfo=BANK_TIMEZONE,
-        )
-    )
-
-
-@pytest.fixture
-def night_operation_policy() -> OperationPolicy:
-    return OperationPolicy(
-        clock=lambda: datetime(
-            2026,
-            1,
-            1,
-            1,
-            tzinfo=BANK_TIMEZONE,
-        )
-    )

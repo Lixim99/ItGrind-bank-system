@@ -96,6 +96,34 @@ def test_day1_deposit_and_withdrawal_apply_percentage_commission(
 
 
 @pytest.mark.parametrize(
+    "account_class",
+    [BankAccount, SavingsAccount, PremiumAccount, InvestmentAccount],
+)
+def test_day3_night_policy_blocks_direct_deposit_and_withdrawal(
+    client_factory,
+    bank_clock,
+    account_class,
+):
+    account = account_class(
+        client=client_factory(),
+        currency=AccountCurrency.RUB,
+    )
+    account.deposit(Decimal("1000"))
+    balance_before = account.balance
+    history_before = account.balance_history
+    bank_clock.now = bank_clock.now.replace(hour=1)
+
+    with pytest.raises(InvalidOperationError, match="00:00 to 05:00"):
+        account.deposit(Decimal("100"))
+
+    with pytest.raises(InvalidOperationError, match="00:00 to 05:00"):
+        account.withdraw(Decimal("100"))
+
+    assert account.balance == balance_before
+    assert account.balance_history == history_before
+
+
+@pytest.mark.parametrize(
     ("status", "expected_error"),
     [
         (AccountStatus.FROZEN, AccountFrozenError),
@@ -216,15 +244,19 @@ def test_day2_investment_portfolio_and_yearly_projection(client_factory):
     account.deposit(Decimal("1000"))
     account.allocate_asset(InvestmentAccountActives.stocks, Decimal("400"))
     account.allocate_asset(InvestmentAccountActives.bonds, Decimal("250"))
-    account.project_yearly_growth()
+    balance_before_projection = account.balance
+    history_before_projection = account.balance_history
+
+    projected_balance = account.project_yearly_growth()
 
     assert account.portfolio == {
         InvestmentAccountActives.stocks: Decimal("400"),
         InvestmentAccountActives.bonds: Decimal("250"),
         InvestmentAccountActives.etf: Decimal("0"),
     }
-    assert account.balance == Decimal("1130.00")
-    assert len(account.balance_history) == 2
+    assert projected_balance == Decimal("1130.00")
+    assert account.balance == balance_before_projection
+    assert account.balance_history == history_before_projection
 
     with pytest.raises(InsufficientFundsError, match="allocation"):
         account.allocate_asset(InvestmentAccountActives.etf, Decimal("1000"))

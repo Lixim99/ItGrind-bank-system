@@ -155,7 +155,6 @@ def test_day5_risk_detects_frequent_operations(client_factory):
 def test_day5_high_risk_operation_is_blocked_and_audited(
     client_factory,
     tmp_path,
-    allowed_operation_policy,
 ):
     sender = BankAccount(
         client=client_factory(1),
@@ -179,7 +178,6 @@ def test_day5_high_risk_operation_is_blocked_and_audited(
         currency_converter=CurrencyConverter(),
         risk_analyzer=RiskAnalyzer(),
         audit_log=audit_log,
-        operation_policy=allowed_operation_policy,
     )
 
     processor.process(transaction)
@@ -188,3 +186,5 @@ def test_day5_high_risk_operation_is_blocked_and_audited(
     assert sender.balance == Decimal("200000")
     assert receiver.balance == Decimal("0")
     assert audit_log.records[-1].level is AuditLevel.CRITICAL
+    assert sender.client.is_suspicious
+    assert not receiver.client.is_suspicious

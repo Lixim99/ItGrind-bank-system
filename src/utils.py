@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from datetime import datetime
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
 from pwdlib import PasswordHash

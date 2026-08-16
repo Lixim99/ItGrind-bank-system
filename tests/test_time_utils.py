@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.exceptions import InvalidOperationError
-from src.transaction import OperationPolicy
+from src.policy import OperationPolicy
 from src.utils import BANK_TIMEZONE, bank_now, to_bank_time
 
 
@@ -32,31 +32,30 @@ def test_to_bank_time_rejects_naive_datetime():
 
 
 @pytest.mark.parametrize("hour", [0, 1, 4])
-def test_day3_operation_policy_blocks_from_midnight_until_five(hour):
-    policy = OperationPolicy(
-        clock=lambda: datetime(
-            2026,
-            1,
-            1,
-            hour,
-            59,
-            tzinfo=BANK_TIMEZONE,
-        )
+def test_day3_operation_policy_blocks_from_midnight_until_five(
+    bank_clock,
+    hour,
+):
+    bank_clock.now = datetime(
+        2026,
+        1,
+        1,
+        hour,
+        59,
+        tzinfo=BANK_TIMEZONE,
     )
 
     with pytest.raises(InvalidOperationError, match="00:00 to 05:00"):
-        policy.ensure_operation_allowed()
+        OperationPolicy.ensure_operation_allowed()
 
 
-def test_day3_operation_policy_allows_operation_at_exactly_five():
-    policy = OperationPolicy(
-        clock=lambda: datetime(
-            2026,
-            1,
-            1,
-            5,
-            tzinfo=BANK_TIMEZONE,
-        )
+def test_day3_operation_policy_allows_operation_at_exactly_five(bank_clock):
+    bank_clock.now = datetime(
+        2026,
+        1,
+        1,
+        5,
+        tzinfo=BANK_TIMEZONE,
     )
 
-    policy.ensure_operation_allowed()
+    OperationPolicy.ensure_operation_allowed()

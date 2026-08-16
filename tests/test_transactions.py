@@ -53,7 +53,6 @@ def make_transaction(sender, receiver, **overrides):
 
 
 def make_low_risk_processor(
-    operation_policy,
     *,
     converter=None,
     audit_log=None,
@@ -69,7 +68,6 @@ def make_low_risk_processor(
         currency_converter=converter or CurrencyConverter(),
         risk_analyzer=risk_analyzer,
         audit_log=audit_log or SimpleNamespace(log=lambda **_values: None),
-        operation_policy=operation_policy,
     )
 
 
@@ -188,7 +186,6 @@ def test_day4_external_commission_and_currency_conversion(accounts):
 )
 def test_day4_processor_charges_transfer_commission_exactly_once(
     client_factory,
-    allowed_operation_policy,
     account_class,
     transaction_type,
     expected_balance,
@@ -208,16 +205,17 @@ def test_day4_processor_charges_transfer_commission_exactly_once(
         transaction_type=transaction_type,
     )
 
-    make_low_risk_processor(allowed_operation_policy).process(transaction)
+    make_low_risk_processor().process(transaction)
 
     assert transaction.status is TransactionStatus.COMPLETED
     assert sender.balance == expected_balance
     assert receiver.balance == Decimal("100")
+    assert not sender.client.is_suspicious
+    assert not receiver.client.is_suspicious
 
 
 def test_day4_premium_transfer_can_use_overdraft(
     client_factory,
-    allowed_operation_policy,
 ):
     sender = PremiumAccount(
         client=client_factory(1),
@@ -229,7 +227,7 @@ def test_day4_premium_transfer_can_use_overdraft(
     )
     transaction = make_transaction(sender, receiver)
 
-    make_low_risk_processor(allowed_operation_policy).process(transaction)
+    make_low_risk_processor().process(transaction)
 
     assert transaction.status is TransactionStatus.COMPLETED
     assert sender.balance == Decimal("-100")
@@ -237,7 +235,6 @@ def test_day4_premium_transfer_can_use_overdraft(
 
 def test_day4_failed_credit_rolls_back_balance_and_history(
     client_factory,
-    allowed_operation_policy,
     tmp_path,
 ):
     sender = BankAccount(
@@ -258,7 +255,6 @@ def test_day4_failed_credit_rolls_back_balance_and_history(
         currency_converter=CurrencyConverter(),
         risk_analyzer=RiskAnalyzer(),
         audit_log=audit_log,
-        operation_policy=allowed_operation_policy,
     )
 
     processor.process(transaction)
@@ -268,21 +264,23 @@ def test_day4_failed_credit_rolls_back_balance_and_history(
     assert receiver.balance == Decimal("0")
     assert sender.balance_history == history_before
     assert audit_log.records[-1].level is AuditLevel.CRITICAL
+    assert not sender.client.is_suspicious
+    assert not receiver.client.is_suspicious
 
 
 def test_day4_night_operation_is_blocked_before_balance_change(
     accounts,
-    night_operation_policy,
+    bank_clock,
     tmp_path,
 ):
     transaction = make_transaction(*accounts)
     audit_log = AuditLog(tmp_path / "audit.jsonl")
+    bank_clock.now = bank_clock.now.replace(hour=1)
     processor = TransactionProcessor(
         commission_calculator=CommissionCalculator(),
         currency_converter=CurrencyConverter(),
         risk_analyzer=RiskAnalyzer(),
         audit_log=audit_log,
-        operation_policy=night_operation_policy,
     )
 
     processor.process(transaction)
@@ -290,11 +288,34 @@ def test_day4_night_operation_is_blocked_before_balance_change(
     assert transaction.status is TransactionStatus.FAILED
     assert accounts[0].balance == Decimal("10000")
     assert accounts[1].balance == Decimal("0")
+    assert accounts[0].client.is_suspicious
+    assert not accounts[1].client.is_suspicious
+
+
+def test_day5_medium_risk_marks_only_sender_as_suspicious(accounts):
+    transaction = make_transaction(*accounts)
+    risk_analyzer = SimpleNamespace(
+        analyze=lambda _transaction: SimpleNamespace(
+            level=RiskLevel.MEDIUM,
+            reasons=("Frequent operations",),
+        )
+    )
+    processor = TransactionProcessor(
+        commission_calculator=CommissionCalculator(),
+        currency_converter=CurrencyConverter(),
+        risk_analyzer=risk_analyzer,
+        audit_log=SimpleNamespace(log=lambda **_values: None),
+    )
+
+    processor.process(transaction)
+
+    assert transaction.status is TransactionStatus.COMPLETED
+    assert accounts[0].client.is_suspicious
+    assert not accounts[1].client.is_suspicious
 
 
 def test_day4_processor_retries_temporary_errors(
     accounts,
-    allowed_operation_policy,
 ):
     class FlakyConverter(CurrencyConverter):
         def __init__(self):
@@ -310,21 +331,19 @@ def test_day4_processor_retries_temporary_errors(
 
     converter = FlakyConverter()
     transaction = make_transaction(*accounts)
-    processor = make_low_risk_processor(
-        allowed_operation_policy,
-        converter=converter,
-    )
+    processor = make_low_risk_processor(converter=converter)
 
     processor.process(transaction)
 
     assert converter.calls == TransactionProcessor.MAX_RETRIES
     assert len(transaction.errors) == 2
     assert transaction.status is TransactionStatus.COMPLETED
+    assert not accounts[0].client.is_suspicious
+    assert not accounts[1].client.is_suspicious
 
 
 def test_day4_processor_records_final_retry_error(
     accounts,
-    allowed_operation_policy,
     tmp_path,
 ):
     class UnavailableConverter:
@@ -339,7 +358,6 @@ def test_day4_processor_records_final_retry_error(
     audit_log = AuditLog(tmp_path / "audit.jsonl")
     transaction = make_transaction(*accounts)
     processor = make_low_risk_processor(
-        allowed_operation_policy,
         converter=converter,
         audit_log=audit_log,
     )
@@ -350,3 +368,5 @@ def test_day4_processor_records_final_retry_error(
     assert transaction.status is TransactionStatus.FAILED
     assert transaction.reason == "Currency service unavailable"
     assert audit_log.records[-1].level is AuditLevel.CRITICAL
+    assert not accounts[0].client.is_suspicious
+    assert not accounts[1].client.is_suspicious

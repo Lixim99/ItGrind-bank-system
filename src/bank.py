@@ -9,6 +9,7 @@ from .enums import (
 )
 from .exceptions import InvalidOperationError
 from .models import BankAccount, Client
+from .policy import OperationPolicy
 from .utils import password_hasher
 
 
@@ -205,6 +206,8 @@ class Bank:
 
     @staticmethod
     def _ensure_client_can_transact(client: Client | None) -> None:
+        OperationPolicy.ensure_operation_allowed()
+
         if client is None:
             raise InvalidOperationError("Account has no registered client")
         if client.is_blocked:

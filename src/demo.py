@@ -23,7 +23,6 @@ from .report import ReportBuilder
 from .transaction import (
     CommissionCalculator,
     CurrencyConverter,
-    OperationPolicy,
     Transaction,
     TransactionProcessor,
     TransactionQueue,
@@ -232,7 +231,6 @@ def run_demo(output_dir: str | Path = DEFAULT_OUTPUT_DIR) -> DemoData:
         currency_converter=CurrencyConverter(),
         risk_analyzer=RiskAnalyzer(),
         audit_log=audit_log,
-        operation_policy=OperationPolicy(clock=demo_clock),
     )
     transactions: list[Transaction] = []
 

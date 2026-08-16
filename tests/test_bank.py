@@ -135,6 +135,52 @@ def test_day3_bank_controls_valid_status_transitions(client_factory):
         bank.unfreeze_account(account)
 
 
+def test_day3_night_policy_blocks_open_account(client_factory, bank_clock):
+    bank = Bank()
+    client = bank.add_client(client_factory())
+    bank_clock.now = bank_clock.now.replace(hour=1)
+
+    with pytest.raises(InvalidOperationError, match="00:00 to 05:00"):
+        bank.open_account(
+            client=client,
+            account_class=BankAccount,
+            currency=AccountCurrency.RUB,
+        )
+
+    assert not bank.accounts
+    assert not client.accounts
+
+
+@pytest.mark.parametrize(
+    ("method_name", "initial_status"),
+    [
+        ("close_account", AccountStatus.ACTIVE),
+        ("freeze_account", AccountStatus.ACTIVE),
+        ("unfreeze_account", AccountStatus.FROZEN),
+    ],
+)
+def test_day3_night_policy_blocks_account_status_operations(
+    client_factory,
+    bank_clock,
+    method_name,
+    initial_status,
+):
+    bank = Bank()
+    client = bank.add_client(client_factory())
+    account = bank.open_account(
+        client=client,
+        account_class=BankAccount,
+        currency=AccountCurrency.RUB,
+    )
+    account.change_account_status(initial_status)
+    bank_clock.now = bank_clock.now.replace(hour=1)
+
+    with pytest.raises(InvalidOperationError, match="00:00 to 05:00"):
+        getattr(bank, method_name)(account)
+
+    assert account.status is initial_status
+
+
 def test_day3_bank_rejects_unregistered_or_blocked_client(client_factory):
     bank = Bank()
 

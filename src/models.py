@@ -15,6 +15,7 @@ from .exceptions import (
     InsufficientFundsError,
     InvalidOperationError,
 )
+from .policy import OperationPolicy
 from .utils import bank_now, password_hasher, round_money
 
 
@@ -151,6 +152,8 @@ class BankAccount(AbstractAccount):
             )
 
     def _ensure_can_operate(self) -> None:
+        OperationPolicy.ensure_operation_allowed()
+
         if self.status == AccountStatus.FROZEN:
             raise AccountFrozenError()
 
@@ -384,7 +387,7 @@ class InvestmentAccount(BankAccount):
 
         self._portfolio[asset] += amount
 
-    def project_yearly_growth(self) -> None:
+    def project_yearly_growth(self) -> Decimal:
         self._ensure_can_operate()
 
         if self.balance <= 0:
@@ -392,10 +395,9 @@ class InvestmentAccount(BankAccount):
                 "Balance must be positive to project yearly growth."
             )
 
-        self._balance = round_money(
+        return round_money(
             self.balance * (Decimal("1") + self.YEARLY_GROWTH_RATE)
         )
-        self._record_balance()
 
     def get_account_info(self) -> dict:
         return {
@@ -570,7 +572,10 @@ class Client:
 
         if self._failed_login_attempts >= max_attempts:
             self._status = ClientStatus.BLOCKED
-            self._is_suspicious = True
+            self.mark_is_suspicious()
+
+    def mark_is_suspicious(self) -> None:
+        self._is_suspicious = True
 
     def reset_failed_logins(self) -> None:
         self._failed_login_attempts = 0
