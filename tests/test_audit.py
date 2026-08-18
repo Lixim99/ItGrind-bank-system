@@ -117,6 +117,43 @@ def test_day5_ordinary_operation_has_low_risk(client_factory):
     assert assessment.reasons == ("Transfer to new account",)
 
 
+def test_day5_large_amount_risk_uses_base_currency_value(client_factory):
+    usd_sender = BankAccount(
+        client=client_factory(1),
+        currency=AccountCurrency.USD,
+    )
+    kzt_sender = BankAccount(
+        client=client_factory(2),
+        currency=AccountCurrency.KZT,
+    )
+    receiver = BankAccount(
+        client=client_factory(3),
+        currency=AccountCurrency.RUB,
+    )
+
+    usd_assessment = RiskAnalyzer().analyze(
+        make_transaction(
+            client_factory,
+            amount="2000",
+            sender=usd_sender,
+            receiver=receiver,
+            created_at=datetime(2026, 1, 1, 12, tzinfo=BANK_TIMEZONE),
+        )
+    )
+    kzt_assessment = RiskAnalyzer().analyze(
+        make_transaction(
+            client_factory,
+            amount="100000",
+            sender=kzt_sender,
+            receiver=receiver,
+            created_at=datetime(2026, 1, 1, 12, tzinfo=BANK_TIMEZONE),
+        )
+    )
+
+    assert "Large transaction" in usd_assessment.reasons
+    assert "Large transaction" not in kzt_assessment.reasons
+
+
 def test_day5_risk_detects_frequent_operations(client_factory):
     sender = BankAccount(
         client=client_factory(1),

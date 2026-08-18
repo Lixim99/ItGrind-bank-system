@@ -20,6 +20,7 @@ from .exceptions import (
     InsufficientFundsError,
     InvalidOperationError,
 )
+from .exchange_rates import RUB_RATES
 from .models import BankAccount
 from .policy import OperationPolicy
 from .utils import Clock, bank_now, round_money, to_bank_time
@@ -83,6 +84,10 @@ class Transaction:
     def updated_at(self) -> datetime:
         return self._updated_at
 
+    @property
+    def execute_at(self) -> datetime | None:
+        return self._execute_at
+
     def __init__(
         self,
         *,
@@ -112,6 +117,7 @@ class Transaction:
         self._errors: list[tuple[datetime, str]] = []
         self._updated_at = now
         self._created_at = now
+        self._execute_at: datetime | None = None
 
     def fail(self, reason: str) -> None:
         if self._status not in (
@@ -176,6 +182,14 @@ class Transaction:
         self._errors.append((now, error))
         self._updated_at = now
 
+    def _schedule_for(self, execute_at: datetime) -> None:
+        if self._status is not TransactionStatus.ACTIVE:
+            raise InvalidOperationError(
+                "Only an active transaction can be scheduled"
+            )
+
+        self._execute_at = to_bank_time(execute_at)
+
     def _validate_amount(self, amount: Decimal) -> Decimal:
         if not isinstance(amount, Decimal):
             raise ValueError("Transaction amount must be Decimal")
@@ -229,6 +243,7 @@ class TransactionQueue:
         if transaction.id in self._transactions:
             raise ValueError("Transaction is already in queue")
 
+        transaction._schedule_for(execute_at)
         self._transactions[transaction.id] = transaction
 
         order = next(self._counter)
@@ -330,13 +345,7 @@ class CommissionCalculator:
 
 
 class CurrencyConverter:
-    RUB_RATES: ClassVar[dict[AccountCurrency, Decimal]] = {
-        AccountCurrency.RUB: Decimal("1.0"),
-        AccountCurrency.USD: Decimal("82.1665"),
-        AccountCurrency.EUR: Decimal("94.8366"),
-        AccountCurrency.KZT: Decimal("0.175765"),
-        AccountCurrency.CNY: Decimal("12.1655"),
-    }
+    RUB_RATES: ClassVar[dict[AccountCurrency, Decimal]] = RUB_RATES
 
     def convert(
         self,
@@ -429,6 +438,28 @@ class TransactionProcessor:
                 client_id=transaction.sender.client.id,
             )
 
+            return
+
+        try:
+            OperationPolicy.ensure_operation_allowed(
+                transaction.created_at
+            )
+
+            if transaction.execute_at is not None:
+                OperationPolicy.ensure_operation_allowed(
+                    transaction.execute_at
+                )
+        except InvalidOperationError as error:
+            transaction.sender.client.mark_is_suspicious()
+
+            transaction.fail(str(error))
+
+            self._audit_log.log(
+                level=AuditLevel.WARNING,
+                message=str(error),
+                transaction_id=transaction.id,
+                client_id=transaction.sender.client.id,
+            )
             return
 
         if assessment.level == RiskLevel.MEDIUM:

@@ -128,10 +128,32 @@ def test_day7_saves_pie_bar_and_balance_charts(client_factory, tmp_path):
     for chart in (
         charts_dir / "client_balances.png",
         charts_dir / "transaction_statuses.png",
+        charts_dir / "account_balance_history.png",
         balance_chart,
     ):
         assert chart.exists()
         assert chart.stat().st_size > 0
+
+
+def test_day7_saves_empty_balance_history_chart(client_factory, tmp_path):
+    builder, bank, client, _account = make_report_builder(
+        client_factory,
+        tmp_path,
+    )
+    empty_account = bank.open_account(
+        client=client,
+        account_class=BankAccount,
+        currency=AccountCurrency.EUR,
+    )
+    chart_path = tmp_path / "empty_balance.png"
+
+    builder.save_account_balance_chart(
+        account=empty_account,
+        file_path=chart_path,
+    )
+
+    assert chart_path.exists()
+    assert chart_path.stat().st_size > 0
 
 
 def test_balance_chart_uses_readable_time_labels():

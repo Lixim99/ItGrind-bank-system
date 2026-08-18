@@ -9,7 +9,8 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Mapping
 from uuid import UUID
 
-from .enums import AuditLevel, RiskLevel
+from .enums import AccountCurrency, AuditLevel, RiskLevel
+from .exchange_rates import RUB_RATES
 from .utils import bank_now, to_bank_time
 
 if TYPE_CHECKING:
@@ -125,6 +126,7 @@ class RiskAssessment:
 
 
 class RiskAnalyzer:
+    BASE_CURRENCY = AccountCurrency.RUB
     LARGE_AMOUNT = Decimal("100000.0")
 
     FREQUENT_OPERATIONS_LIMIT = 5
@@ -163,7 +165,11 @@ class RiskAnalyzer:
         )
 
     def _is_large_amount(self, transaction: Transaction) -> bool:
-        return transaction.amount >= self.LARGE_AMOUNT
+        amount_in_base_currency = (
+            transaction.amount * RUB_RATES[transaction.currency_from]
+        )
+
+        return amount_in_base_currency >= self.LARGE_AMOUNT
 
     def _has_frequent_operations(self, transaction: Transaction) -> bool:
         window_start = transaction.created_at - self.FREQUENT_OPERATIONS_WINDOW

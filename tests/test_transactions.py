@@ -292,6 +292,76 @@ def test_day4_night_operation_is_blocked_before_balance_change(
     assert not accounts[1].client.is_suspicious
 
 
+def test_day4_transaction_created_at_night_stays_blocked_during_day(
+    accounts,
+    bank_clock,
+    tmp_path,
+):
+    transaction = make_transaction(
+        *accounts,
+        created_at=datetime(
+            2026,
+            1,
+            1,
+            1,
+            tzinfo=BANK_TIMEZONE,
+        ),
+    )
+    bank_clock.now = bank_clock.now.replace(hour=12)
+    audit_log = AuditLog(tmp_path / "audit.jsonl")
+    processor = TransactionProcessor(
+        commission_calculator=CommissionCalculator(),
+        currency_converter=CurrencyConverter(),
+        risk_analyzer=RiskAnalyzer(),
+        audit_log=audit_log,
+    )
+
+    processor.process(transaction)
+
+    assert transaction.status is TransactionStatus.FAILED
+    assert accounts[0].balance == Decimal("10000")
+    assert "00:00 to 05:00" in transaction.reason
+
+
+def test_day4_transaction_scheduled_at_night_stays_blocked_later(
+    accounts,
+    bank_clock,
+    tmp_path,
+):
+    created_at = datetime(
+        2026,
+        1,
+        1,
+        12,
+        tzinfo=BANK_TIMEZONE,
+    )
+    execute_at = created_at + timedelta(hours=13)
+    queue_clock = SimpleNamespace(now=created_at)
+    queue = TransactionQueue(clock=lambda: queue_clock.now)
+    transaction = make_transaction(
+        *accounts,
+        created_at=created_at,
+    )
+    queue.put(transaction=transaction, execute_at=execute_at)
+    queue_clock.now = execute_at + timedelta(hours=6)
+    queued_transaction = queue.get()
+    assert queued_transaction is transaction
+    assert transaction.execute_at == execute_at
+
+    bank_clock.now = queue_clock.now
+    processor = TransactionProcessor(
+        commission_calculator=CommissionCalculator(),
+        currency_converter=CurrencyConverter(),
+        risk_analyzer=RiskAnalyzer(),
+        audit_log=AuditLog(tmp_path / "audit.jsonl"),
+    )
+
+    processor.process(transaction)
+
+    assert transaction.status is TransactionStatus.FAILED
+    assert accounts[0].balance == Decimal("10000")
+
+
 def test_day5_medium_risk_marks_only_sender_as_suspicious(accounts):
     transaction = make_transaction(*accounts)
     risk_analyzer = SimpleNamespace(

@@ -224,6 +224,7 @@ class ReportBuilder:
         self,
         directory: str | Path,
         currency: AccountCurrency = AccountCurrency.RUB,
+        account: BankAccount | None = None,
     ) -> None:
         directory = Path(directory)
 
@@ -240,6 +241,22 @@ class ReportBuilder:
 
         self._save_transaction_statuses(
             file_path=directory / "transaction_statuses.png",
+        )
+
+        if account is None:
+            accounts = tuple(self._bank.accounts.values())
+            account = next(
+                (
+                    item
+                    for item in accounts
+                    if item.balance_history
+                ),
+                accounts[0] if accounts else None,
+            )
+
+        self._save_balance_history_chart(
+            account=account,
+            file_path=directory / "account_balance_history.png",
         )
 
     def _save_transaction_statuses(
@@ -361,13 +378,10 @@ class ReportBuilder:
     def _save_balance_history_chart(
         self,
         *,
-        account: BankAccount,
+        account: BankAccount | None,
         file_path: str | Path,
     ) -> None:
-        history = account.balance_history
-
-        if not history:
-            return
+        history = account.balance_history if account is not None else ()
 
         timestamps: Sequence[datetime] = [
             timestamp
@@ -381,32 +395,47 @@ class ReportBuilder:
 
         plt.figure(figsize=(10, 6))
 
-        operation_numbers = range(1, len(history) + 1)
+        if history:
+            operation_numbers = range(1, len(history) + 1)
 
-        plt.plot(
-            operation_numbers,
-            balances,
-            marker="o",
-        )
+            plt.plot(
+                operation_numbers,
+                balances,
+                marker="o",
+            )
+        else:
+            plt.text(
+                0.5,
+                0.5,
+                "Нет данных об изменениях баланса",
+                horizontalalignment="center",
+                verticalalignment="center",
+            )
+            plt.axis("off")
 
-        plt.title(
-            f"История баланса: ***{account.account_number[-4:]}"
+        account_suffix = (
+            f": ***{account.account_number[-4:]}"
+            if account is not None
+            else ""
         )
+        plt.title(f"История баланса{account_suffix}")
         plt.xlabel("Время операции (Москва)")
-        plt.ylabel(
-            f"Баланс ({account.currency.value})"
-        )
+        if account is not None:
+            plt.ylabel(
+                f"Баланс ({account.currency.value})"
+            )
 
-        label_positions = _select_label_positions(len(history))
-        plt.xticks(
-            ticks=[position + 1 for position in label_positions],
-            labels=[
-                _format_chart_time(timestamps[position])
-                for position in label_positions
-            ],
-            rotation=35,
-            ha="right",
-        )
+        if history:
+            label_positions = _select_label_positions(len(history))
+            plt.xticks(
+                ticks=[position + 1 for position in label_positions],
+                labels=[
+                    _format_chart_time(timestamps[position])
+                    for position in label_positions
+                ],
+                rotation=35,
+                ha="right",
+            )
         plt.tight_layout()
 
         plt.savefig(file_path)

@@ -200,10 +200,9 @@ def export_reports(
             output_dir / f"client_{number}.json",
         )
 
-    builder.save_charts(output_dir)
-    builder.save_account_balance_chart(
+    builder.save_charts(
+        output_dir,
         account=accounts[0],
-        file_path=output_dir / "account_balance_history.png",
     )
 
 
